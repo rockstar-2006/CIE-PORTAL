@@ -1,0 +1,51 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function hasRole(role) {
+      return isAuthenticated() && 
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == role;
+    }
+
+    // Users Collection
+    match /users/{userId} {
+      allow get: if true; 
+      allow list: if hasRole('admin');
+      allow write: if hasRole('admin');
+    }
+
+    // Labs Collection
+    match /labs/{labId} {
+      allow read: if isAuthenticated();
+      allow write: if hasRole('admin');
+    }
+
+    // CIEs Collection
+    match /cies/{cieId} {
+      allow read: if isAuthenticated();
+      // Allow students to initialize the clock (startedAt)
+      allow update: if isAuthenticated();
+      allow write: if hasRole('admin');
+    }
+
+    // Submissions Collection
+    match /submissions/{submissionId} {
+      // Use the submissionId (cieId_uid) to verify the current student
+      allow read, write: if isAuthenticated() && (
+        request.auth.uid == submissionId.split('_').pop() || 
+        hasRole('admin')
+      );
+    }
+
+    // Integrity Logs
+    match /integrityLogs/{logId} {
+      allow create: if isAuthenticated();
+      allow read: if hasRole('admin');
+    }
+  }
+}

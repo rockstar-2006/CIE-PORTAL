@@ -1,0 +1,40 @@
+# Electron files - not needed for web deployment
+electron-main.js
+preload.js
+dist/
+*.exe
+
+# Build artifacts
+.next/
+out/
+build/
+
+# Development
+.env.local
+.env.local.example
+scratch/
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Temporary files
+*.tmp
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Sample/test files
+student_sample.xlsx
+flutter_lab_manual_merged*
+
+# Git files
+.git/
+.gitignore
+
+# Documentation
+CLAUDE.md
+README_DEVELOPMENT.md
