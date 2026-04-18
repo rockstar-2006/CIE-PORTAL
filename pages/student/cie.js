@@ -354,6 +354,8 @@ export default function CIESession() {
           lockedRef.current = true;
           setIsViolationOverlay(true);
           overlayActiveRef.current = true;
+          setLoading(false);
+          loadingRef.current = false;
           return;
       }
 
