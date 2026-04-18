@@ -47,8 +47,7 @@ function createWindow() {
       experimentalFeatures: false,
       enableBlinkFeatures: '',   // Disable experimental blink features
       spellcheck: false,
-    },
-    userAgent: 'CIE-Native-Shell-Secure' 
+    }
   });
 
   // Set always-on-top to 'screen-saver' level (highest priority on Windows)
@@ -64,8 +63,7 @@ function createWindow() {
   // Remove the application menu entirely
   Menu.setApplicationMenu(null);
 
-  // ⚠️ TEMP FOR LOCAL TESTING: Force the .exe to look at localhost instead of the live Firebase website!
-  const url = 'http://localhost:3000'; // Was: isDev ? 'http://localhost:3000' : 'https://cies-20152.web.app';
+  const url = isDev ? 'http://localhost:3000' : 'https://cieportal.vercel.app';
   mainWindow.loadURL(url);
 
   // Force true fullscreen over taskbar instantly right before showing
@@ -196,7 +194,7 @@ function createWindow() {
   //  BLOCK NAVIGATION AWAY FROM EXAM
   // ═══════════════════════════════════════════════
   mainWindow.webContents.on('will-navigate', (e, navUrl) => {
-    const allowed = isDev ? 'http://localhost:3000' : 'https://cies-20152.web.app';
+    const allowed = isDev ? 'http://localhost:3000' : 'https://cieportal.vercel.app';
     if (!navUrl.startsWith(allowed)) {
       e.preventDefault();
     }

@@ -343,8 +343,8 @@ export default function CIESession() {
       const user = auth.currentUser;
       if (!user) { router.push('/'); return; }
 
-      // Check for Native App via custom User Agent
-      const isNative = typeof navigator !== 'undefined' && navigator.userAgent.includes('CIE-Native-Shell-Secure');
+      // Check for Native App securely via Electron IPC bridges
+      const isNative = typeof window !== 'undefined' && !!window.electronAPI;
       
       // Allow localhost for development, but in production this is HARD ENFORCED
       const isDev = window.location.hostname === 'localhost';
