@@ -7,6 +7,8 @@ import { db, auth } from '@/lib/firebase';
 import { doc, getDoc, updateDoc, arrayUnion, Timestamp, addDoc, collection, setDoc } from 'firebase/firestore';
 import axios from 'axios';
 import { labsData } from '@/lib/labs';
+import { getDartCompletions } from '@/lib/dartCompletions';
+import { runDartLinter } from '@/lib/dartLinter';
 
 const MonacoEditor = dynamic(() => import('@monaco-editor/react'), { ssr: false });
 
@@ -37,6 +39,9 @@ export default function CIESession() {
   const [submitting, setSubmitting] = useState(false);
   const [showSubmitConfirm, setShowSubmitConfirm] = useState(false); // Custom submit modal
   const [previewUI, setPreviewUI] = useState(null);
+  const [deviceScale, setDeviceScale] = useState(1.0);
+  const [activeSymbol, setActiveSymbol] = useState(null); // Track widget student is currently editing
+  const [proctorTip, setProctorTip] = useState("✨ Hello! I'm your AI Pair Proctor. I'll provide tips here as you build."); // Resizable virtual device
 
   // ═══════════════════════════════════════════════
   //  REFS (avoid stale closures in event handlers)
@@ -49,6 +54,10 @@ export default function CIESession() {
   const loadingRef = useRef(true);
   const submittingRef = useRef(false);
   const warningTimeoutRef = useRef(null);
+  const editorRef = useRef(null);
+  const monacoRef = useRef(null);
+  const lintTimeoutRef = useRef(null);
+  const completionProviderRef = useRef(null);
 
   // Keep refs in sync with state
   useEffect(() => { loadingRef.current = loading; }, [loading]);
@@ -451,6 +460,25 @@ export default function CIESession() {
   };
 
   const handleRunCode = async () => {
+    if (!editorRef.current || !monacoRef.current) return;
+    const model = editorRef.current.getModel();
+    const markers = monacoRef.current.editor.getModelMarkers({ resource: model.uri });
+    
+    // Check if any marker is an Error (Severity 8)
+    const hasErrors = markers.some(m => m.severity === 8);
+
+    if (hasErrors) {
+      setCompilationResults(prev => {
+        const n = [...prev];
+        n[activeProgramIdx] = { 
+          output: `❌ BUILD FAILED\n> Errors detected in your code.\n> Please fix the highlighted red lines before running.`, 
+          status: 'error' 
+        };
+        return n;
+      });
+      return;
+    }
+
     const currentCode = codes[activeProgramIdx];
     setCompilationResults(prev => { const n = [...prev]; n[activeProgramIdx] = { output: '⚡ RENDERING VIRTUAL UI...', status: 'loading' }; return n; });
 
@@ -501,6 +529,21 @@ export default function CIESession() {
       submittingRef.current = false;
       alert("Submission failed. Try again.");
     }
+  };
+
+  const handleFormatCode = () => {
+    if (editorRef.current) {
+      editorRef.current.getAction('editor.action.formatDocument').run();
+    }
+  };
+
+  // Thin wrapper — actual rules live in lib/dartLinter.js
+  const validateCodeContent = (val) => {
+    if (!editorRef.current || !monacoRef.current) return;
+    const model = editorRef.current.getModel();
+    // Pass current program so linter can detect off-topic code
+    const currentProgram = programs[activeProgramIdx] || null;
+    runDartLinter(val, monacoRef.current, model, currentProgram);
   };
 
   if (loading) return <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#020617', color: '#10b981', fontFamily: 'monospace' }}>⚡ ESTABLISHING SECURE CONNECTION...</div>;
@@ -695,162 +738,222 @@ export default function CIESession() {
         </div>
       </header>
 
-      <main style={{ display: 'flex', height: 'calc(100vh - 70px)', userSelect: 'none' }}>
-        {/* SIDEBAR: PROGRAMS */}
-        <aside style={{ width: '360px', borderRight: '1px solid #1e293b', background: '#020617', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ padding: '30px', flex: 1, overflowY: 'auto' }}>
-            <h4 style={{ fontSize: '12px', color: '#64748b', letterSpacing: '2px', marginBottom: '20px' }}>PROGRAM QUEUE</h4>
-            {programs.length === 0 ? <p style={{ color: '#64748b' }}>No programs loaded. Check Admin setup.</p> : programs.map((p, i) => (
-              <div key={i} onClick={() => setActiveProgramIdx(i)} style={{ 
-                padding: '20px', borderRadius: '20px', background: activeProgramIdx === i ? 'rgba(16, 185, 129, 0.1)' : '#0f172a',
-                border: `1px solid ${activeProgramIdx === i ? '#10b981' : '#1e293b'}`, marginBottom: '12px', cursor: 'pointer', transition: 'all 0.2s'
-              }}>
-                <div style={{ fontSize: '10px', color: '#64748b', marginBottom: '4px' }}>CODE {i+1}</div>
-                <div style={{ fontWeight: 'bold', fontSize: '15px', color: activeProgramIdx === i ? '#10b981' : '#f8fafc' }}>{p.title}</div>
-              </div>
+      <main style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 70px)', userSelect: 'none', background: '#020617' }}>
+        
+        {/* ═══ TOP TABS: PROGRAM QUEUE ═══ */}
+        <nav style={{ height: '60px', borderBottom: '1px solid #1e293b', background: '#020617', display: 'flex', alignItems: 'center', padding: '0 30px', gap: '20px' }}>
+          <div style={{ fontSize: '11px', color: '#64748b', fontWeight: 'bold', letterSpacing: '2px', marginRight: '10px' }}>PROGRAM QUEUE</div>
+          <div style={{ display: 'flex', gap: '8px', flex: 1, overflowX: 'auto' }}>
+            {programs.map((p, i) => (
+              <button 
+                key={i} 
+                onClick={() => setActiveProgramIdx(i)}
+                style={{
+                  padding: '8px 20px', borderRadius: '12px', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer', transition: 'all 0.2s',
+                  background: activeProgramIdx === i ? 'rgba(16, 185, 129, 0.15)' : 'transparent',
+                  border: `1px solid ${activeProgramIdx === i ? '#10b981' : '#1e293b'}`,
+                  color: activeProgramIdx === i ? '#10b981' : '#64748b'
+                }}
+              >
+                {i+1}. {p.title}
+              </button>
             ))}
-
-            <div style={{ marginTop: '30px', background: '#0f172a', padding: '24px', borderRadius: '24px', border: '1px solid #1e293b' }}>
-              <h5 style={{ fontSize: '11px', color: '#10b981', letterSpacing: '1px', marginBottom: '15px' }}>REQUIREMENTS</h5>
-              <div style={{ fontSize: '14px', lineHeight: '1.7', color: '#cbd5e1' }}>{programs[activeProgramIdx]?.description}</div>
-            </div>
           </div>
-        </aside>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+             <div style={{ height: '24px', width: '1px', background: '#1e293b' }} />
+             <div style={{ fontSize: '11px', color: '#10b981', fontWeight: 'bold' }}>VERSION 4.2.0 | SECURE</div>
+          </div>
+        </nav>
 
-        {/* CENTER: EDITOR */}
-        <section style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#0f172a', position: 'relative' }}>
-           {/* Dynamic Multi-Tiled Watermark (harder to crop out) */}
-           <div style={{ 
-              position: 'absolute', inset: 0, zIndex: 5, pointerEvents: 'none', 
-              overflow: 'hidden', opacity: 0.035, userSelect: 'none'
-           }}>
-              {[...Array(8)].map((_, row) => (
-                <div key={row} style={{
-                  display: 'flex', gap: '40px', padding: '20px 0',
-                  transform: `rotate(-25deg) translateX(${row % 2 === 0 ? '-80px' : '0px'})`,
-                  whiteSpace: 'nowrap'
-                }}>
-                  {[...Array(4)].map((_, col) => (
-                    <span key={col} style={{ fontSize: '18px', fontWeight: 'bold', color: 'white', letterSpacing: '2px' }}>
-                      {auth.currentUser?.email || auth.currentUser?.uid}
-                    </span>
-                  ))}
-                </div>
-              ))}
-           </div>
-
-           <div style={{ flex: 1, position: 'relative', zIndex: 10 }}>
-              {isViolationOverlay ? (
-                <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#020617', color: '#64748b' }}>
-                    <div style={{ textAlign: 'center' }}>
-                        <Lock size={48} style={{ marginBottom: '20px', opacity: 0.2 }} />
-                        <p style={{ fontSize: '12px', letterSpacing: '2px' }}>CODE VIRTUALIZED & LOCKED</p>
-                    </div>
-                </div>
-              ) : (
-                <MonacoEditor 
-                  height="100%" language="dart" theme="vs-dark" value={codes[activeProgramIdx]}
-                  options={{ 
-                    fontSize: 16, 
-                    minimap: { enabled: false }, 
-                    fontFamily: 'monospace', 
-                    contextmenu: false, // Double block context menu
-                    automaticLayout: true,
-                    readOnly: false,
-                    domReadOnly: false,
-                    copySelection: false, // Block internal copy
-                    selectionClipboard: false,
-                    selectionHighlight: false, // Hide selection highlighting
-                    occurrencesHighlight: 'off', // Don't highlight occurrences
-                    renderLineHighlight: 'none', // No line highlight
-                    // Hard block shortcuts
-                    links: false,
-                    dragAndDrop: false,
-                    quickSuggestions: false,
-                    mouseStyle: 'text',
-                    columnSelection: false
-                  }}
-                  onMount={(editor, monaco) => {
-                      // Wipe the clipboard on focus
-                      editor.onDidFocusEditorWidget(() => {
-                          try { navigator.clipboard.writeText(""); } catch (e) {}
-                      });
-
-                      // Block the 'paste' action inside Monaco specifically
-                      editor.addAction({
-                          id: 'block-paste',
-                          label: 'Block Paste',
-                          keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyV],
-                          run: () => null
-                      });
-                      editor.addAction({
-                          id: 'block-copy',
-                          label: 'Block Copy',
-                          keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyC],
-                          run: () => null
-                      });
-                      // Block Cut (Ctrl+X) inside Monaco
-                      editor.addAction({
-                          id: 'block-cut',
-                          label: 'Block Cut',
-                          keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyX],
-                          run: () => null
-                      });
-                      // Block Select All (Ctrl+A) inside Monaco
-                      editor.addAction({
-                          id: 'block-select-all',
-                          label: 'Block Select All',
-                          keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyA],
-                          run: () => null
-                      });
-                      // Block Shift+Arrow selections
-                      editor.addAction({
-                          id: 'block-shift-select',
-                          label: 'Block Shift Select',
-                          keybindings: [
-                              monaco.KeyMod.Shift | monaco.KeyCode.LeftArrow,
-                              monaco.KeyMod.Shift | monaco.KeyCode.RightArrow,
-                              monaco.KeyMod.Shift | monaco.KeyCode.UpArrow,
-                              monaco.KeyMod.Shift | monaco.KeyCode.DownArrow,
-                              monaco.KeyMod.Shift | monaco.KeyCode.Home,
-                              monaco.KeyMod.Shift | monaco.KeyCode.End
-                          ],
-                          run: () => null
-                      });
-                  }}
-                  onChange={(v) => { 
-                      const n = [...codes]; n[activeProgramIdx] = v; setCodes(n); 
-                  }}
-                />
-              )}
-           </div>
-
-           {/* TERMINAL FOOTER */}
-           <div style={{ height: '240px', background: '#020617', borderTop: '2px solid #1e293b', display: 'flex' }}>
-              <div style={{ flex: 1, padding: '20px', display: 'flex', flexDirection: 'column' }}>
-                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
-                    <div style={{ fontSize: '12px', color: '#10b981', fontWeight: 'bold', letterSpacing: '1px' }}>SIMULATION CONSOLE</div>
-                    <button onClick={handleRunCode} className="btn" style={{ background: '#10b981', color: '#000', padding: '6px 15px', fontSize: '11px', fontWeight: 'bold' }}>RUN BUILD</button>
-                 </div>
-                 <div style={{ flex: 1, background: '#0f172a', padding: '15px', borderRadius: '15px', border: '1px solid #1e293b', overflowY: 'auto' }}>
-                    <pre style={{ margin: 0, fontSize: '13px', color: '#94a3b8', whiteSpace: 'pre-wrap', fontFamily: 'monospace' }}>
-                        {compilationResults[activeProgramIdx]?.output || '> Waiting for build command...'}
-                    </pre>
-                 </div>
+        <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+          {/* ═══ LEFT SIDEBAR: MOBILE CONSOLE ═══ */}
+          <aside style={{ width: '420px', borderRight: '1px solid #1e293b', background: '#020617', display: 'flex', flexDirection: 'column', padding: '25px', gap: '20px' }}>
+            
+            {/* Requirements Box */}
+            <div style={{ background: '#0f172a', padding: '20px', borderRadius: '24px', border: '1px solid #1e293b' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+                <FileText size={14} color="#10b981" />
+                <h5 style={{ fontSize: '11px', color: '#10b981', letterSpacing: '1px', margin: 0 }}>REQUIREMENTS</h5>
               </div>
-              
-              <div style={{ width: '280px', padding: '20px', borderLeft: '1px solid #1e293b', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                 <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '15px', fontWeight: 'bold' }}>VIRTUAL DEVICE PREVIEW</div>
-                 <div style={{ width: '160px', height: '240px', background: previewUI?.bgColor || '#f1f5f9', borderRadius: '24px', border: '8px solid #334155', overflow: 'hidden', display: 'flex', flexDirection: 'column', transform: 'scale(0.7)', transformOrigin: 'top center' }}>
-                    {previewUI?.appBar && <div style={{ background: '#0284c7', padding: '12px', color: 'white', fontSize: '14px', fontWeight: 'bold' }}>{previewUI.appBar}</div>}
-                    <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '15px', color: '#0f172a', fontSize: '16px', fontWeight: 'bold' }}>
-                       {previewUI?.bodyText}
+              <div style={{ fontSize: '13px', lineHeight: '1.6', color: '#94a3b8' }}>{programs[activeProgramIdx]?.description}</div>
+            </div>
+
+            {/* LARGE VIRTUAL DEVICE */}
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '15px' }}>
+               <div style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 'bold', letterSpacing: '1px' }}>VIRTUAL DEVICE PREVIEW</div>
+                  <div style={{ display: 'flex', gap: '4px' }}>
+                     <button onClick={() => setDeviceScale(s => Math.max(0.6, s - 0.1))} style={{ background: '#1e293b', border: '1px solid #334155', color: '#94a3b8', borderRadius: '6px', width: '24px', height: '24px' }}>-</button>
+                     <span style={{ fontSize: '10px', color: '#64748b', minWidth: '35px', textAlign: 'center' }}>{Math.round(deviceScale * 100)}%</span>
+                     <button onClick={() => setDeviceScale(s => Math.min(1.4, s + 0.1))} style={{ background: '#1e293b', border: '1px solid #334155', color: '#94a3b8', borderRadius: '6px', width: '24px', height: '24px' }}>+</button>
+                  </div>
+               </div>
+
+               <div style={{ 
+                  width: (280 * deviceScale) + 'px', 
+                  height: (540 * deviceScale) + 'px', // Taller for Mobile-First look
+                  background: '#1a1a2e', borderRadius: (40 * deviceScale) + 'px',
+                  border: Math.max(6, Math.round(12 * deviceScale)) + 'px solid #1e293b',
+                  boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)', overflow: 'hidden',
+                  display: 'flex', flexDirection: 'column', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
+               }}>
+                  {/* Status Bar */}
+                  <div style={{ height: (24 * deviceScale) + 'px', background: previewUI?.appBar ? '#0284c7' : '#0f172a', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 15px' }}>
+                    <span style={{ fontSize: (9 * deviceScale) + 'px', color: 'rgba(255,255,255,0.8)', fontWeight: 'bold' }}>9:41</span>
+                    <div style={{ display: 'flex', gap: (4 * deviceScale) + 'px' }}>
+                      <Activity size={10 * deviceScale} color="rgba(255,255,255,0.8)" />
+                      <Clock size={10 * deviceScale} color="rgba(255,255,255,0.8)" />
                     </div>
-                    {previewUI?.hasButton && <div style={{ margin: '15px', background: '#ef4444', height: '35px', borderRadius: '10px' }} />}
-                 </div>
-              </div>
-           </div>
-        </section>
+                  </div>
+
+                  {/* AppBar with Visual Mirror Highlight */}
+                  {previewUI?.appBar && (
+                    <div style={{ 
+                      background: '#0284c7', 
+                      padding: (12 * deviceScale) + 'px ' + (15 * deviceScale) + 'px', 
+                      color: 'white', fontSize: (14 * deviceScale) + 'px', fontWeight: 'bold',
+                      borderBottom: activeSymbol === 'AppBar' ? `${3 * deviceScale}px solid #10b981` : 'none',
+                      boxShadow: activeSymbol === 'AppBar' ? 'inset 0 0 20px rgba(16, 185, 129, 0.3)' : 'none'
+                    }}>
+                      {previewUI.appBar}
+                    </div>
+                  )}
+
+                  {/* Body with Visual Mirror Highlights */}
+                  <div style={{ flex: 1, overflowY: 'auto', background: previewUI?.bgColor || '#f1f5f9', padding: (15 * deviceScale) + 'px' }}>
+                    {previewUI ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: (12 * deviceScale) + 'px' }}>
+                         <div style={{ 
+                            fontSize: (15 * deviceScale) + 'px', color: '#0f172a', fontWeight: '500',
+                            padding: (8 * deviceScale) + 'px', borderRadius: (8 * deviceScale) + 'px',
+                            background: activeSymbol === 'Text' ? 'rgba(16, 185, 129, 0.1)' : 'transparent',
+                            border: activeSymbol === 'Text' ? '1px solid #10b981' : '1px solid transparent'
+                         }}>
+                           {previewUI.bodyText}
+                         </div>
+                         {previewUI.hasButton && (
+                            <div style={{ 
+                               background: '#0284c7', color: 'white', padding: (12 * deviceScale) + 'px', 
+                               borderRadius: (12 * deviceScale) + 'px', textAlign: 'center', fontWeight: 'bold',
+                               fontSize: (13 * deviceScale) + 'px', cursor: 'pointer',
+                               boxShadow: activeSymbol === 'ElevatedButton' ? '0 0 15px #10b981' : 'none',
+                               transform: activeSymbol === 'ElevatedButton' ? 'scale(1.02)' : 'scale(1)',
+                               transition: 'all 0.2s'
+                            }}>
+                              SUBMIT DATA
+                            </div>
+                         )}
+                      </div>
+                    ) : (
+                      <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontSize: (11 * deviceScale) + 'px', textAlign: 'center', padding: '20px' }}>
+                        Build your Flutter app and run it to see the result here.
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Home Bar */}
+                  <div style={{ height: (20 * deviceScale) + 'px', background: '#0f172a', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                     <div style={{ width: (60 * deviceScale) + 'px', height: '4px', background: '#334155', borderRadius: '10px' }} />
+                  </div>
+               </div>
+            </div>
+          </aside>
+
+          {/* ═══ CENTER: THE COCKPIT EDITOR ═══ */}
+          <section style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#0f172a', position: 'relative' }}>
+             {/* Integrated AI Pair Proctor Bar (Unique) */}
+             <div style={{ height: '45px', background: 'rgba(2, 6, 23, 0.8)', borderBottom: '1px solid #1e293b', display: 'flex', alignItems: 'center', padding: '0 20px', zIndex: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1 }}>
+                   <div style={{ width: '8px', height: '8px', background: '#10b981', borderRadius: '50%', boxShadow: '0 0 10px #10b981' }} />
+                   <p style={{ fontSize: '11px', color: '#10b981', fontWeight: '600', margin: 0 }}>AI PAIR PROCTOR:</p>
+                   <p style={{ fontSize: '11px', color: '#94a3b8', margin: 0, fontStyle: 'italic' }}>{proctorTip}</p>
+                </div>
+                <div style={{ display: 'flex', gap: '15px' }}>
+                    <div style={{ fontSize: '10px', color: '#64748b' }}>SQUIGGLES: <span style={{ color: '#f59e0b' }}>ON</span></div>
+                    <div style={{ fontSize: '10px', color: '#64748b' }}>SECURITY: <span style={{ color: '#10b981' }}>AIRTIGHT</span></div>
+                </div>
+             </div>
+
+             <div style={{ flex: 1, position: 'relative' }}>
+                {isViolationOverlay ? (
+                  <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#020617', color: '#64748b' }}>
+                      <div style={{ textAlign: 'center' }}>
+                          <Lock size={48} style={{ marginBottom: '20px', opacity: 0.2 }} />
+                          <p style={{ fontSize: '12px', letterSpacing: '2px' }}>CODE VIRTUALIZED & LOCKED</p>
+                      </div>
+                  </div>
+                ) : (
+                  <MonacoEditor 
+                    height="100%" language="dart" theme="vs-dark" value={codes[activeProgramIdx]}
+                    options={{ 
+                      fontSize: 16, minimap: { enabled: false }, contextmenu: false, automaticLayout: true,
+                      wordBasedSuggestions: false, snippetSuggestions: 'top', 
+                      bracketPairColorization: { enabled: true }, lineNumbers: 'on',
+                      selectionHighlight: true, // Allow selection highlighting
+                      multiCursorModifier: 'alt',
+                      scrollbar: { vertical: 'hidden', horizontal: 'hidden' }
+                    }}
+                    onMount={(editor, monaco) => {
+                        editorRef.current = editor;
+                        monacoRef.current = monaco;
+                        
+                        if (completionProviderRef.current) completionProviderRef.current.dispose();
+                        completionProviderRef.current = monaco.languages.registerCompletionItemProvider('dart', {
+                          triggerCharacters: ['.', '(', ' ', '@'].concat(['S','A','C','T','E','R','p','m','v','i','f','L','M','w','F']),
+                          provideCompletionItems: (model, position) => {
+                            return { suggestions: getDartCompletions(monaco, model, position) };
+                          }
+                        });
+
+                        // Visual Mirror: Detect active widget under cursor
+                        editor.onDidChangeCursorPosition((e) => {
+                           const model = editor.getModel();
+                           const line = model.getLineContent(e.position.lineNumber);
+                           if (line.includes('AppBar')) setActiveSymbol('AppBar');
+                           else if (line.includes('Text')) setActiveSymbol('Text');
+                           else if (line.includes('ElevatedButton') || line.includes('Button')) setActiveSymbol('ElevatedButton');
+                           else setActiveSymbol(null);
+
+                           // AI Proctor Tips based on cursor
+                           if (line.includes('setState')) setProctorTip("💡 Keep your setState simple for better performance.");
+                           else if (line.includes('Column')) setProctorTip("💡 Use MainAxisAlignment to align children vertically.");
+                           else if (line.includes('Container')) setProctorTip("💡 Try Adding padding or decoration to your Container.");
+                        });
+                        
+                        setTimeout(() => validateCodeContent(codes[activeProgramIdx]), 500);
+
+                        editor.onDidFocusEditorWidget(() => { try { navigator.clipboard.writeText(""); } catch (e) {} });
+                        editor.addAction({ id: 'block-paste', label: 'Block Paste', keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyV], run: () => null });
+                        editor.addAction({ id: 'block-copy', label: 'Block Copy', keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyC], run: () => null });
+                    }}
+                    onChange={(v) => { 
+                        const n = [...codes]; n[activeProgramIdx] = v; setCodes(n); 
+                        if (lintTimeoutRef.current) clearTimeout(lintTimeoutRef.current);
+                        lintTimeoutRef.current = setTimeout(() => validateCodeContent(v), 200);
+                    }}
+                  />
+                )}
+             </div>
+
+             {/* ═══ CONSOLE FOOTER ═══ */}
+             <div style={{ height: '180px', background: '#020617', borderTop: '1px solid #1e293b', display: 'flex' }}>
+                <div style={{ flex: 1, padding: '20px', display: 'flex', flexDirection: 'column' }}>
+                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                      <div style={{ fontSize: '11px', color: '#10b981', fontWeight: 'bold', letterSpacing: '1.5px' }}>SIMULATION CONSOLE</div>
+                      <div style={{ display: 'flex', gap: '10px' }}>
+                         <button onClick={handleFormatCode} style={{ background: '#1e293b', color: '#94a3b8', border: '1px solid #334155', borderRadius: '8px', padding: '6px 15px', fontSize: '11px', cursor: 'pointer' }}>FORMAT</button>
+                         <button onClick={handleRunCode} style={{ background: '#10b981', color: '#000', border: 'none', borderRadius: '8px', padding: '6px 20px', fontSize: '11px', fontWeight: '800', cursor: 'pointer' }}>RUN BUILD</button>
+                      </div>
+                   </div>
+                   <div style={{ flex: 1, background: '#0f172a', padding: '15px', borderRadius: '15px', border: '1px solid #1e293b', overflowY: 'auto' }}>
+                      <pre style={{ margin: 0, fontSize: '13px', color: '#94a3b8', whiteSpace: 'pre-wrap', fontFamily: 'monospace' }}>
+                          {compilationResults[activeProgramIdx]?.output || '> Waiting for build command...'}
+                      </pre>
+                   </div>
+                </div>
+             </div>
+          </section>
+        </div>
       </main>
 
       {/* Inline keyframe animations + selection blocking CSS */}
@@ -867,19 +970,18 @@ export default function CIESession() {
           0%, 100% { transform: scale(1); opacity: 1; }
           50% { transform: scale(1.05); opacity: 0.8; }
         }
-        /* Kill ALL text selection visually */
+        /* Block copying but allow selection */
         * {
-          -webkit-user-select: none !important;
-          -moz-user-select: none !important;
-          -ms-user-select: none !important;
-          user-select: none !important;
+          -webkit-user-select: none;
+          user-select: none;
         }
-        /* Hide Monaco selection highlight (blue highlight) */
-        .monaco-editor .selected-text { background: transparent !important; }
-        .monaco-editor .selectionHighlight { background: transparent !important; }
-        .monaco-editor .cslr.selected-text { background: transparent !important; }
-        /* Allow typing cursor to appear in editor */
-        .monaco-editor .inputarea { -webkit-user-select: text !important; user-select: text !important; }
+        /* Specifically allow selection in editor and console */
+        .monaco-editor, .monaco-editor *, pre, code, input, textarea {
+          -webkit-user-select: text !important;
+          user-select: text !important;
+        }
+        /* Hide Monaco selection highlight (blue highlight) - actually we want to see it now */
+        /*.monaco-editor .selected-text { background: transparent !important; }*/
       `}</style>
     </div>
   );

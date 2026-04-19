@@ -1,4 +1,7 @@
-@AGENTS.md
+---
+description: Truthpack-First Protocol — MANDATORY truthpack consultation before any code generation
+alwaysApply: true
+---
 
 ## TRUTHPACK-FIRST PROTOCOL (MANDATORY)
 
@@ -45,3 +48,5 @@ After EVERY response where you consulted or referenced any truthpack file, you M
 
 *Verified By VibeCheck ✅*
 
+---
+<!-- vibecheck:context-engine:v2 -->
