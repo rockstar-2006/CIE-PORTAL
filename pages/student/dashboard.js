@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/router';
 import Head from 'next/head';
 import { db, auth } from '@/lib/firebase';
-import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, doc, getDoc, onSnapshot } from 'firebase/firestore';
 import { Play, CheckCircle, Clock, FileText, LogOut, Layout, BookOpen, CheckSquare, AlertCircle, RefreshCcw, Download, ShieldCheck, Power } from 'lucide-react';
 import { jsPDF } from "jspdf";
 import autoTable from 'jspdf-autotable';
@@ -24,11 +24,33 @@ export default function StudentDashboard({ deferredPrompt, handleInstallClick })
       if (!window.electronAPI) setShowDownloadBtn(true);
       if (window.electronAPI) setShowExitBtn(true);
     }
+    const unsubscribeAuth = auth.onAuthStateChanged((user) => {
+      if (user) {
+        // 1. Initial Profile Fetch
+        fetchStudentData(user);
 
-    const unsubscribe = auth.onAuthStateChanged((user) => {
-      if (!user) { router.push('/'); } else { fetchStudentData(user); }
+        // 2. Real-time Submissions (for status/score updates)
+        const qSubs = query(collection(db, 'submissions'), where('studentId', '==', user.uid));
+        const unsubSubs = onSnapshot(qSubs, (snap) => {
+          setSubmissions(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        });
+
+        // 3. Real-time CIEs (for new exam assignments)
+        const unsubCies = onSnapshot(collection(db, 'cies'), (snap) => {
+          const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+          setActiveCies(list.filter(c => c.status === 'active'));
+          setLoading(false);
+        });
+
+        return () => {
+          unsubSubs();
+          unsubCies();
+        };
+      } else {
+        router.push('/');
+      }
     });
-    return () => unsubscribe();
+    return () => unsubscribeAuth();
   }, []);
 
   const fetchStudentData = async (user) => {

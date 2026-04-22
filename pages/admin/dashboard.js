@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import Head from 'next/head';
 import { useRouter } from 'next/router';
 import { db, auth } from '@/lib/firebase';
-import { collection, query, getDocs, doc, setDoc, updateDoc, Timestamp, deleteDoc, where } from 'firebase/firestore';
+import { collection, query, getDocs, doc, setDoc, updateDoc, Timestamp, deleteDoc, where, onSnapshot } from 'firebase/firestore';
 import { 
   Users, 
   Settings, 
@@ -41,23 +41,41 @@ export default function AdminDashboard() {
   const [importing, setImporting] = useState(false);
 
   useEffect(() => {
-    const unsubscribe = auth.onAuthStateChanged((user) => {
-      if (user) { fetchData(); } else { router.push('/'); }
+    const unsubscribeAuth = auth.onAuthStateChanged((user) => {
+      if (user) {
+        // 1. Initial Students Fetch (Static list usually)
+        getDocs(collection(db, 'users')).then(snap => {
+          setStudents(snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(u => u.role === 'student'));
+        });
+
+        // 2. Real-time CIEs
+        const unsubCies = onSnapshot(collection(db, 'cies'), (snap) => {
+          setCies(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        });
+
+        // 3. Real-time Submissions (Critical for Live Violations)
+        const unsubSubs = onSnapshot(collection(db, 'submissions'), (snap) => {
+          setSubmissions(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+          setLoading(false);
+        });
+
+        return () => {
+          unsubCies();
+          unsubSubs();
+        };
+      } else {
+        router.push('/');
+      }
     });
-    return () => unsubscribe();
+    return () => unsubscribeAuth();
   }, []);
 
   const fetchData = async () => {
-    try {
-      setLoading(true);
-      const studentSnap = await getDocs(collection(db, 'users'));
-      setStudents(studentSnap.docs.map(d => ({ id: d.id, ...d.data() })).filter(u => u.role === 'student'));
-      const cieSnap = await getDocs(collection(db, 'cies'));
-      setCies(cieSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-      const subSnap = await getDocs(collection(db, 'submissions'));
-      setSubmissions(subSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-      setLoading(false);
-    } catch (err) { console.error(err); setLoading(false); }
+    // Legacy manual refresh if needed, but onSnapshot handles it now
+    setLoading(true);
+    const subSnap = await getDocs(collection(db, 'submissions'));
+    setSubmissions(subSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+    setLoading(false);
   };
 
   const handleFileUpload = (e) => {
