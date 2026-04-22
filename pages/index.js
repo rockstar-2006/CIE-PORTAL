@@ -205,8 +205,15 @@ export default function Home({ deferredPrompt, handleInstallClick }) {
           Faculty / Admin Sign In
         </button>
 
-        <footer style={{ marginTop: '30px', paddingTop: '24px', borderTop: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', color: '#cbd5e1', fontSize: '11px', fontWeight: '600' }}>
-          <ShieldCheck size={14} /> SECURE EVALUATION ENVIRONMENT
+        <footer style={{ marginTop: '30px', paddingTop: '24px', borderTop: '1px solid #f1f5f9', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '8px', color: '#cbd5e1', fontSize: '11px', fontWeight: '600' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <ShieldCheck size={14} /> SECURE EVALUATION ENVIRONMENT
+          </div>
+          <p style={{ marginTop: '12px', fontSize: '9px', color: '#94a3b8', lineHeight: '1.4', maxWidth: '320px', fontWeight: 'normal' }}>
+            <strong>Safe Browsing Notice:</strong> This is a private educational portal. 
+            The system utilizes fullscreen and input-blocking features exclusively for 
+            academic integrity during proctored exams.
+          </p>
         </footer>
       </div>
     </div>

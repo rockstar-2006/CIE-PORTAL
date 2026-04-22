@@ -32,31 +32,48 @@ export default function StudentDashboard({ deferredPrompt, handleInstallClick })
 
   const fetchStudentData = async (user) => {
     try {
+      setLoading(true);
       // 1. Get student profile for Year filtering
       const userDoc = await getDoc(doc(db, 'users', user.uid));
       const profile = userDoc.data() || {};
       const studentYear = profile.year || 'Unknown';
 
-      // 2. Query CIEs
+      // 2. Query ALL Submissions first to know which CIEs the student interacted with
+      const subSnap = await getDocs(query(collection(db, 'submissions'), where('studentId', '==', user.uid)));
+      const allSubmissions = subSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+      setSubmissions(allSubmissions);
+
+      // 3. Query Active CIEs
       const cieSnap = await getDocs(query(collection(db, 'cies'), where('status', '==', 'active')));
-      const allActive = cieSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const activeList = cieSnap.docs.map(d => ({ id: d.id, ...d.data() }));
       
-      // 3. Filter by Year
-      const filteredCies = allActive.filter(cie => 
+      // 4. Fetch Titles for Inactive CIEs that have submissions
+      const uniqueSubCieIds = [...new Set(allSubmissions.map(s => s.cieId))];
+      const missingCieIds = uniqueSubCieIds.filter(id => !activeList.some(ac => ac.id === id));
+      
+      const missingCieData = [];
+      for (const id of missingCieIds) {
+        const d = await getDoc(doc(db, 'cies', id));
+        if (d.exists()) missingCieData.push({ id: d.id, ...d.data() });
+      }
+
+      const allRelevantCies = [...activeList, ...missingCieData];
+      
+      // 5. Filter Active CIEs by Year for the "NEW" section
+      const filteredCies = activeList.filter(cie => 
         cie.targetYear === 'All' || 
         String(cie.targetYear) === String(studentYear) ||
         (studentYear.includes(cie.targetYear))
       );
 
-      const subSnap = await getDocs(query(collection(db, 'submissions'), where('studentId', '==', user.uid)));
-      const allSubmissions = subSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-      setSubmissions(allSubmissions);
-      
       const categorized = filteredCies.map(cie => {
         const sub = allSubmissions.find(s => s.cieId === cie.id);
         return { ...cie, subStatus: sub ? sub.status : 'new' };
       });
+      
       setActiveCies(categorized);
+      // Store all relevant CIE info for the tables
+      window.__cieCache = allRelevantCies; 
       setLoading(false);
     } catch (err) { console.error(err); setLoading(false); }
   };
@@ -88,7 +105,7 @@ export default function StudentDashboard({ deferredPrompt, handleInstallClick })
   };
 
   const newCies = activeCies.filter(c => c.subStatus === 'new');
-  const pendingCies = activeCies.filter(c => c.subStatus === 'ongoing');
+  const pendingCies = activeCies.filter(c => c.subStatus === 'ongoing' || c.subStatus === 'pending');
   const completedCies = submissions.filter(s => s.status === 'completed' || s.status === 'submitted');
   const restrictedCies = submissions.filter(s => s.status === 'locked');
 
@@ -223,10 +240,10 @@ export default function StudentDashboard({ deferredPrompt, handleInstallClick })
                   <thead><tr style={{ color: '#71717a', fontSize: '13px' }}><th>EVALUATION</th><th>DATE</th><th>SCORE</th><th>REPORT</th></tr></thead>
                   <tbody>
                     {completedCies.map(s => {
-                      const cieInfo = activeCies.find(c => c.id === s.cieId) || { title: 'Unknown Lab' };
+                      const cieInfo = (window.__cieCache || []).find(c => c.id === s.cieId) || { title: s.cieTitle || 'Evaluation' };
                       return (
                       <tr key={s.id} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                        <td style={{ padding: '20px 0' }}><strong>{cieInfo.title || 'Flutter Lab'}</strong></td>
+                        <td style={{ padding: '20px 0' }}><strong>{cieInfo.title}</strong></td>
                         <td>{s.submittedAt?.toDate().toLocaleDateString()}</td>
                         <td>
                           {s.totalScore !== undefined ? (
@@ -234,7 +251,7 @@ export default function StudentDashboard({ deferredPrompt, handleInstallClick })
                           ) : <span style={{ color: '#f59e0b' }}>Evaluating...</span>}
                         </td>
                         <td>
-                          <button onClick={() => downloadResult(s)} style={{ border: 'none', background: 'none', color: '#10b981', cursor: 'pointer' }}><Download size={18}/></button>
+                          <button onClick={() => downloadResult({ ...s, cieTitle: cieInfo.title })} style={{ border: 'none', background: 'none', color: '#10b981', cursor: 'pointer' }}><Download size={18}/></button>
                         </td>
                       </tr>
                     )})}
@@ -250,12 +267,12 @@ export default function StudentDashboard({ deferredPrompt, handleInstallClick })
                   <thead><tr style={{ color: '#71717a', fontSize: '13px' }}><th>EVALUATION</th><th>LOCKED ON</th><th>REASON</th><th>STATUS</th></tr></thead>
                   <tbody>
                     {restrictedCies.map(s => {
-                      const cieInfo = activeCies.find(c => c.id === s.cieId) || { title: 'Unknown Lab' };
+                      const cieInfo = (window.__cieCache || []).find(c => c.id === s.cieId) || { title: s.cieTitle || 'Locked Evaluation' };
                       return (
                       <tr key={s.id} style={{ borderBottom: '1px solid #fee2e2' }}>
                         <td style={{ padding: '20px 0', color: '#09090b', fontWeight: 'bold' }}>{cieInfo.title}</td>
                         <td style={{ color: '#71717a', fontSize: '14px' }}>{s.lockedAt?.toDate().toLocaleString() || 'N/A'}</td>
-                        <td style={{ color: '#ef4444', fontWeight: '600' }}>{s.lockReason || 'Multiple focus loss detected'}</td>
+                        <td style={{ color: '#ef4444', fontWeight: '600' }}>{s.lockReason || 'Security violations detected'}</td>
                         <td><span style={{ padding: '6px 12px', background: '#fee2e2', color: '#ef4444', borderRadius: '8px', fontSize: '12px', fontWeight: '900' }}>RESTRICTED</span></td>
                       </tr>
                     )})}
@@ -288,13 +305,16 @@ export default function StudentDashboard({ deferredPrompt, handleInstallClick })
 function CIECard({ cie, status, onSelect }) {
   return (
     <div className="premium-card" style={{ position: 'relative', overflow: 'hidden' }}>
-      <div style={{ position: 'absolute', top: 0, right: 0, padding: '10px 20px', background: status === 'new' ? '#dcfce7' : '#fef3c7', color: status === 'new' ? '#166534' : '#92400e', fontSize: '10px', fontWeight: 'bold', borderRadius: '0 0 0 16px' }}>{status.toUpperCase()}</div>
+      <div style={{ position: 'absolute', top: 0, right: 0, padding: '10px 20px', background: status === 'new' ? '#dcfce7' : '#fef3c7', color: status === 'new' ? '#166534' : '#92400e', fontSize: '10px', fontWeight: 'bold', borderRadius: '0 0 0 16px' }}>
+        {status === 'pending' && <span className="pulse" style={{ display: 'inline-block', width: '8px', height: '8px', background: '#f59e0b', borderRadius: '50%', marginRight: '8px' }}></span>}
+        {status.toUpperCase()}
+      </div>
       <h3 style={{ marginBottom: '15px' }}>{cie.title}</h3>
       <div style={{ display: 'flex', gap: '15px', color: '#71717a', fontSize: '13px', marginBottom: '30px' }}>
         <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}><Clock size={14}/>{cie.durationMinutes}m</span>
         <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}><CheckSquare size={14}/>{cie.assignedProgramNos?.length || 0} Progs</span>
       </div>
-      <button onClick={() => onSelect(cie)} className="btn btn-primary" style={{ width: '100%', height: '54px', borderRadius: '16px', background: '#0f172a', justifyContent: 'center' }}>
+      <button onClick={() => onSelect(cie)} className="btn btn-primary" style={{ width: '100%', height: '54px', borderRadius: '16px', background: status === 'new' ? '#0f172a' : '#10b981', color: status === 'new' ? 'white' : 'black', justifyContent: 'center' }}>
         {status === 'new' ? 'LAUNCH EXAM' : 'RESUME MISSION'}
       </button>
     </div>

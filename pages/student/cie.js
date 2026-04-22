@@ -1,987 +1,1132 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { useRouter } from 'next/router';
-import Head from 'next/head';
-import dynamic from 'next/dynamic';
-import { Play, Send, ChevronRight, AlertCircle, Clock, Maximize, User, ShieldCheck, FileText, Activity, Lock, AlertTriangle, ShieldAlert, Camera, CameraOff } from 'lucide-react';
-import { db, auth } from '@/lib/firebase';
-import { doc, getDoc, updateDoc, arrayUnion, Timestamp, addDoc, collection, setDoc } from 'firebase/firestore';
-import axios from 'axios';
-import { labsData } from '@/lib/labs';
-import { getDartCompletions } from '@/lib/dartCompletions';
-import { runDartLinter } from '@/lib/dartLinter';
+import { useState, useEffect, useRef } from "react";
+import { useRouter } from "next/router";
+import Head from "next/head";
+import dynamic from "next/dynamic";
+import {
+  Play,
+  Clock,
+  FileText,
+  Activity,
+  Lock,
+  Terminal,
+  ShieldAlert,
+  CameraOff,
+  ShieldCheck,
+  AlertCircle,
+  RefreshCw,
+  Zap,
+  Smartphone,
+} from "lucide-react";
+import { db, auth } from "@/lib/firebase";
+import { doc, getDoc, updateDoc, setDoc, Timestamp } from "firebase/firestore";
+import axios from "axios";
+import { labsData } from "@/lib/labs";
+import { runDartLinter } from "@/lib/dartLinter";
+import { registerDartIntellisense } from "@/lib/dartIntellisense";
 
-const MonacoEditor = dynamic(() => import('@monaco-editor/react'), { ssr: false });
+const HELLO_WORLD_DART = `import 'package:flutter/material.dart';
+void main() => runApp(const MaterialApp(debugShowCheckedModeBanner: false, home: Scaffold(backgroundColor: Colors.white, body: Center(child: Text('VIRTUAL DEVICE READY', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold))))));`;
 
-// ═══════════════════════════════════════════════
-//  SECURITY CONSTANTS
-// ═══════════════════════════════════════════════
-const MAX_STRIKES = 3;               // Only 3 strikes before permanent lock
-const STRIKE_COOLDOWN_MS = 3000;     // 3s cooldown between strikes (prevents double-counting)
-const VIOLATION_COUNTDOWN_SECS = 30; // 30s to return to fullscreen before auto-lock
+const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
+  ssr: false,
+});
+
+const MAX_STRIKES = 3;
+const STRIKE_COOLDOWN_MS = 3000;
+const VIOLATION_COUNTDOWN_SECS = 30;
 
 export default function CIESession() {
   const router = useRouter();
   const { cieId } = router.query;
-  
-  const [cie, setCie] = useState(null);
+
   const [programs, setPrograms] = useState([]);
   const [activeProgramIdx, setActiveProgramIdx] = useState(0);
-  const [codes, setCodes] = useState(['', '']);
+  const [codes, setCodes] = useState(["", ""]);
   const [compilationResults, setCompilationResults] = useState([null, null]);
   const [timeLeft, setTimeLeft] = useState(0);
-  const [violationTimeLeft, setViolationTimeLeft] = useState(VIOLATION_COUNTDOWN_SECS);
+  const [violationTimeLeft, setViolationTimeLeft] = useState(
+    VIOLATION_COUNTDOWN_SECS,
+  );
   const [isLocked, setIsLocked] = useState(false);
   const [isViolationOverlay, setIsViolationOverlay] = useState(false);
-  const [strikes, setStrikes] = useState(0);              // STRIKES = focus loss only (3 max)
-  const [warningMessage, setWarningMessage] = useState(''); // Transient warning toast
-  const [showScreenshotBlock, setShowScreenshotBlock] = useState(false); // Screenshot block overlay
+  const [strikes, setStrikes] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [mounted, setMounted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [showSubmitConfirm, setShowSubmitConfirm] = useState(false); // Custom submit modal
-  const [previewUI, setPreviewUI] = useState(null);
-  const [deviceScale, setDeviceScale] = useState(1.0);
-  const [activeSymbol, setActiveSymbol] = useState(null); // Track widget student is currently editing
-  const [proctorTip, setProctorTip] = useState("✨ Hello! I'm your AI Pair Proctor. I'll provide tips here as you build."); // Resizable virtual device
+  const [showSubmitConfirm, setShowSubmitConfirm] = useState(false);
+  const [iframeKey, setIframeKey] = useState(Date.now());
+  const [previewCode, setPreviewCode] = useState("");
+  const [autoRun, setAutoRun] = useState(false); // DEFAULT TO OFF PER USER REQUEST
+  const [isSyncing, setIsSyncing] = useState(false);
 
-  // ═══════════════════════════════════════════════
-  //  REFS (avoid stale closures in event handlers)
-  // ═══════════════════════════════════════════════
   const violationTimerRef = useRef(null);
-  const strikesRef = useRef(0);          // Always up-to-date strike count
-  const overlayActiveRef = useRef(false); // Is violation overlay currently shown?
-  const lockedRef = useRef(false);        // Is session permanently locked?
-  const lastStrikeTimeRef = useRef(0);    // Timestamp of last strike (cooldown)
+  const strikesRef = useRef(0);
+  const overlayActiveRef = useRef(false);
+  const lockedRef = useRef(false);
+  const lastStrikeTimeRef = useRef(0);
   const loadingRef = useRef(true);
   const submittingRef = useRef(false);
-  const warningTimeoutRef = useRef(null);
   const editorRef = useRef(null);
   const monacoRef = useRef(null);
-  const lintTimeoutRef = useRef(null);
-  const completionProviderRef = useRef(null);
+  const autoRunTimeoutRef = useRef(null);
+  const iframeRef = useRef(null);
 
-  // Keep refs in sync with state
-  useEffect(() => { loadingRef.current = loading; }, [loading]);
-  useEffect(() => { submittingRef.current = submitting; }, [submitting]);
-  useEffect(() => { lockedRef.current = isLocked; }, [isLocked]);
-  useEffect(() => { overlayActiveRef.current = isViolationOverlay; }, [isViolationOverlay]);
-
-  // ═══════════════════════════════════════════════
-  //  WARNING TOAST (non-strike, auto-dismiss)
-  // ═══════════════════════════════════════════════
-  const showWarning = useCallback((message) => {
-    setWarningMessage(message);
-    if (warningTimeoutRef.current) clearTimeout(warningTimeoutRef.current);
-    warningTimeoutRef.current = setTimeout(() => setWarningMessage(''), 4000);
+  useEffect(() => {
+    setMounted(true);
   }, []);
 
-  // ═══════════════════════════════════════════════
-  //  SCREENSHOT BLOCK overlay (shows for 3 seconds)
-  // ═══════════════════════════════════════════════
-  const triggerScreenshotBlock = useCallback(() => {
-    setShowScreenshotBlock(true);
-    // Also try to wipe clipboard
-    try { navigator.clipboard.writeText('⛔ Screenshots are disabled in CIE Portal'); } catch (e) {}
-    setTimeout(() => setShowScreenshotBlock(false), 3000);
-    // Log it (warning only, no strike)
-    try {
-      addDoc(collection(db, 'integrityLogs'), {
-        cieId, studentId: auth.currentUser?.uid, reason: 'Screenshot Attempt Blocked',
-        timestamp: Timestamp.now(), type: 'warning',
-        userAgent: navigator.userAgent
-      });
-    } catch (e) {}
-  }, [cieId]);
-
-  // ═══════════════════════════════════════════════
-  //  ELECTRON IPC: OS-level screenshot interception
-  // ═══════════════════════════════════════════════
   useEffect(() => {
-    if (typeof window !== 'undefined' && window.electronAPI?.onScreenshotBlocked) {
-      window.electronAPI.onScreenshotBlocked(() => {
-        triggerScreenshotBlock();
-      });
-    }
-  }, [triggerScreenshotBlock]);
+    loadingRef.current = loading;
+    submittingRef.current = submitting;
+    lockedRef.current = isLocked;
+    overlayActiveRef.current = isViolationOverlay;
+  }, [loading, submitting, isLocked, isViolationOverlay]);
 
-  // ═══════════════════════════════════════════════
-  //  STRIKE VIOLATION (focus loss ONLY)
-  //  - Uses refs to prevent duplicate counting
-  //  - 3-second cooldown between strikes
-  // ═══════════════════════════════════════════════
-  const handleFocusLossStrike = useCallback(async (reason) => {
-    // Guards: skip if overlay active, locked, loading, practice, or submitting
-    if (overlayActiveRef.current || lockedRef.current || loadingRef.current || cieId === 'practice' || submittingRef.current) return;
-
-    // Cooldown check: prevent multiple strikes from the same focus-loss event
-    const now = Date.now();
-    if (now - lastStrikeTimeRef.current < STRIKE_COOLDOWN_MS) return;
-    lastStrikeTimeRef.current = now;
-
-    // Increment strike count via ref (immediate, no async batching issues)
-    strikesRef.current += 1;
-    const currentStrike = strikesRef.current;
-    setStrikes(currentStrike);
-    
-    // Show violation overlay
-    setIsViolationOverlay(true);
-    overlayActiveRef.current = true;
-
-    // Check if max strikes reached
-    if (currentStrike >= MAX_STRIKES) {
-      handleFinalLock(`Strike ${currentStrike}/${MAX_STRIKES}: ${reason}`);
-      return;
-    }
-
-    // Log to Firestore
-    try {
-      await addDoc(collection(db, 'integrityLogs'), {
-        cieId, studentId: auth.currentUser?.uid, reason,
-        timestamp: Timestamp.now(), strikeNo: currentStrike, type: 'strike',
-        userAgent: navigator.userAgent
-      });
-    } catch (e) {}
-
-    // Start 30s countdown to auto-lock (only if not already running)
-    if (!violationTimerRef.current) {
-      violationTimerRef.current = setInterval(() => {
-        setViolationTimeLeft(prev => {
-          if (prev <= 1) {
-            handleFinalLock("30s Focus-Loss Penalty Expired");
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    }
-  }, [cieId]);
-
-  // ═══════════════════════════════════════════════
-  //  SETUP ALL SECURITY LISTENERS
-  // ═══════════════════════════════════════════════
   useEffect(() => {
     if (!cieId) return;
     fetchSessionData();
 
-    // ─── STRIKE EVENT: Focus Loss (blur + visibilitychange) ───
-    const onBlur = () => handleFocusLossStrike('Window Focus Lost');
+    const onBlur = () => {
+      // ONLY trigger strikes in the Secure Launcher
+      const isElectron = typeof window !== 'undefined' && window.electronAPI;
+      if (!isElectron) return;
+
+      setTimeout(() => {
+        if (document.activeElement instanceof HTMLIFrameElement) return;
+        if (
+          overlayActiveRef.current ||
+          lockedRef.current ||
+          loadingRef.current ||
+          submittingRef.current
+        )
+          return;
+        handleFocusLossStrike("Window Focus Lost");
+      }, 100);
+    };
+
     const onVisibilityChange = () => {
-      if (document.hidden) handleFocusLossStrike('Tab Switch / Hidden');
+      const isElectron = typeof window !== 'undefined' && window.electronAPI;
+      if (!isElectron) return;
+      
+      if (document.hidden) handleFocusLossStrike("Tab Switch Detected");
     };
 
-    // ─── WARNING EVENTS (no strike, just toast warning) ───
-    const onResize = () => {
-      if (!document.fullscreenElement && !loadingRef.current && !lockedRef.current) {
-        showWarning('⚠️ Fullscreen required! Please maximize the window.');
+    const blockShortcuts = (e) => {
+      // Block Ctrl+C, Ctrl+V, Ctrl+X, Ctrl+S, Win+V and Mac equivalents
+      const key = e.key ? e.key.toLowerCase() : "";
+      const isPaste = key === "v" || key === "insert";
+      const isCopy = key === "c" || (key === "insert" && e.ctrlKey);
+      const isCut = key === "x";
+      const isSave = key === "s";
+
+      if (
+        (e.ctrlKey || e.metaKey || e.altKey) &&
+        (isPaste || isCopy || isCut || isSave)
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        return false;
+      }
+
+      // Explicitly block Shift+Insert (Paste)
+      if (e.shiftKey && key === "insert") {
+        e.preventDefault();
+        e.stopPropagation();
+        return false;
       }
     };
 
-    const onMouseLeave = () => {
-      if (!loadingRef.current && !lockedRef.current && cieId !== 'practice') {
-        showWarning('⚠️ Mouse left the workspace area.');
-      }
-    };
-
-    // ─── BLOCK events (prevent default, no strike) ───
-    const block = (e) => {
-      e.preventDefault(); // Block right-click, copy, paste
-    };
-
-    // Block text dragging out of window
-    const blockDrag = (e) => { e.preventDefault(); };
-
-    // Block text selection on non-editor areas
-    // Block text selection EVERYWHERE — no exceptions
-    const blockSelect = (e) => {
+    const blockCopyEvents = (e) => {
       e.preventDefault();
+      e.stopPropagation();
+      return false;
     };
 
-    const keyBlock = (e) => {
-      // Block PrintScreen key → show screenshot blocked message
-      if (e.key === 'PrintScreen' || e.keyCode === 44) {
-        e.preventDefault();
-        triggerScreenshotBlock();
-        return;
+    const blockContextMenu = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      return false;
+    };
+
+    // Global CSS to block all text selection and copy operations
+    const globalStyle = document.createElement("style");
+    globalStyle.textContent = `
+      * {
+        -webkit-user-select: none !important;
+        -moz-user-select: none !important;
+        -ms-user-select: none !important;
+        user-select: none !important;
+        -webkit-touch-callout: none !important;
+        -webkit-user-drag: none !important;
       }
-
-      // Detect Win+Shift+S (Snipping Tool) → show screenshot blocked
-      if (e.shiftKey && (e.key === 'S' || e.key === 's') && (e.metaKey || e.getModifierState?.('Meta'))) {
-        e.preventDefault();
-        triggerScreenshotBlock();
-        return;
+      input, textarea {
+        -webkit-user-select: text !important;
+        -moz-user-select: text !important;
+        -ms-user-select: text !important;
+        user-select: text !important;
       }
-
-      // Block F12, Ctrl+Shift+I, Ctrl+Shift+J (DevTools) → warning
-      if (e.keyCode === 123 || (e.ctrlKey && e.shiftKey && (e.keyCode === 73 || e.keyCode === 74))) {
-        e.preventDefault();
-        showWarning('⚠️ Developer Tools are blocked during evaluation.');
-        return;
+      .monaco-editor {
+        -webkit-user-select: text !important;
+        -moz-user-select: text !important;
+        -ms-user-select: text !important;
+        user-select: text !important;
       }
-
-      // Block Ctrl+P (Print) → warning
-      if (e.ctrlKey && !e.shiftKey && e.keyCode === 80) {
-        e.preventDefault();
-        showWarning('⚠️ Printing is disabled during evaluation.');
-        return;
+      body {
+        -webkit-user-select: none !important;
+        -moz-user-select: none !important;
+        -ms-user-select: none !important;
+        user-select: none !important;
       }
+    `;
+    document.head.appendChild(globalStyle);
 
-      // Block Ctrl+S (Save) → silent block
-      if (e.ctrlKey && e.keyCode === 83) { e.preventDefault(); return; }
+    // Attach global event listeners with capture phase
+    window.addEventListener("blur", onBlur);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("keydown", blockShortcuts, { capture: true });
+    window.addEventListener("keyup", blockShortcuts, { capture: true });
+    window.addEventListener("copy", blockCopyEvents, { capture: true });
+    window.addEventListener("cut", blockCopyEvents, { capture: true });
+    window.addEventListener("paste", blockCopyEvents, { capture: true });
+    window.addEventListener("contextmenu", blockContextMenu, { capture: true });
+    window.addEventListener("drop", blockCopyEvents, { capture: true });
+    window.addEventListener("dragover", (e) => e.preventDefault(), {
+      capture: true,
+    });
 
-      // Block Ctrl+U (View Source) → warning
-      if (e.ctrlKey && e.keyCode === 85) {
-        e.preventDefault();
-        showWarning('⚠️ View Source is disabled during evaluation.');
-        return;
-      }
+    document.addEventListener("keydown", blockShortcuts, { capture: true });
+    document.addEventListener("keyup", blockShortcuts, { capture: true });
+    document.addEventListener("copy", blockCopyEvents, { capture: true });
+    document.addEventListener("cut", blockCopyEvents, { capture: true });
+    document.addEventListener("paste", blockCopyEvents, { capture: true });
+    document.addEventListener("contextmenu", blockContextMenu, {
+      capture: true,
+    });
+    document.addEventListener("drop", blockCopyEvents, { capture: true });
+    document.addEventListener("dragover", (e) => e.preventDefault(), {
+      capture: true,
+    });
 
-      // Block Ctrl+A (Select All) outside Monaco → prevent selecting page content
-      if (e.ctrlKey && e.keyCode === 65 && !e.target?.closest?.('.monaco-editor')) {
-        e.preventDefault();
-        return;
-      }
-
-      // Block Ctrl+L / F6 (Address bar focus)
-      if ((e.ctrlKey && e.keyCode === 76) || e.keyCode === 117) {
-        e.preventDefault();
-        return;
-      }
-
-      // Block Ctrl+H (History)
-      if (e.ctrlKey && e.keyCode === 72 && !e.target?.closest?.('.monaco-editor')) {
-        e.preventDefault();
-        showWarning('⚠️ Browser history is blocked during evaluation.');
-        return;
-      }
-
-      // Block Ctrl+G (Go-to) outside Monaco
-      if (e.ctrlKey && e.keyCode === 71 && !e.target?.closest?.('.monaco-editor')) {
-        e.preventDefault();
-        return;
-      }
-
-      // Block Ctrl+N (New window) and Ctrl+W (Close tab)
-      if (e.ctrlKey && (e.keyCode === 78 || e.keyCode === 87)) {
-        e.preventDefault();
-        showWarning('⚠️ Cannot open new windows during evaluation.');
-        return;
-      }
-
-      // Block Ctrl+Shift+Delete (Clear browsing data)
-      if (e.ctrlKey && e.shiftKey && e.keyCode === 46) {
-        e.preventDefault();
-        return;
-      }
-
-      // Block Ctrl+Tab / Ctrl+Shift+Tab (Tab switching)
-      if (e.ctrlKey && e.keyCode === 9) {
-        e.preventDefault();
-        return;
+    // Additional: Block on specific elements
+    const blockElementCopyPaste = (element) => {
+      if (element) {
+        element.addEventListener("copy", blockCopyEvents, { capture: true });
+        element.addEventListener("cut", blockCopyEvents, { capture: true });
+        element.addEventListener("paste", blockCopyEvents, { capture: true });
+        element.addEventListener("keydown", blockShortcuts, { capture: true });
+        element.addEventListener("contextmenu", blockContextMenu, {
+          capture: true,
+        });
       }
     };
 
-    const keyUpBlock = (e) => {
-      if (e.key === 'PrintScreen' || e.keyCode === 44) {
-        e.preventDefault();
-        triggerScreenshotBlock();
-      }
-    };
-
-    // ─── Block window.open (prevent opening new windows/popups) ───
-    const originalWindowOpen = window.open;
-    window.open = () => {
-      showWarning('⚠️ Opening new windows is blocked.');
-      return null;
-    };
-
-    // ─── Periodic clipboard clearing (every 5 seconds) ───
-    const clipboardInterval = setInterval(() => {
-      if (!lockedRef.current && !loadingRef.current) {
-        try { navigator.clipboard.writeText(''); } catch (e) {}
-      }
-    }, 5000);
-
-    // ─── Register all listeners ───
-    window.addEventListener('blur', onBlur);
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    window.addEventListener('resize', onResize);
-    document.addEventListener('fullscreenchange', onResize);
-    document.addEventListener('contextmenu', block);
-    document.addEventListener('copy', block);
-    document.addEventListener('paste', block);
-    document.addEventListener('cut', block);
-    document.addEventListener('dragstart', blockDrag);
-    document.addEventListener('drop', blockDrag);
-    document.addEventListener('selectstart', blockSelect);
-    document.addEventListener('keydown', keyBlock);
-    document.addEventListener('keyup', keyUpBlock);
-
-    // ─── Main timer (exam countdown) ───
-    const timerInterval = setInterval(() => {
-      setTimeLeft(prev => {
-        if (prev <= 1 && !loadingRef.current && cieId !== 'practice') {
-          handleFinalLock("Evaluation Time Expired");
-          return 0;
+    // Block events on the iframe when it's focused
+    const blockIframeEvents = () => {
+      if (iframeRef.current?.contentDocument) {
+        const iframeDoc = iframeRef.current.contentDocument;
+        try {
+          iframeDoc.addEventListener("copy", blockCopyEvents, {
+            capture: true,
+          });
+          iframeDoc.addEventListener("cut", blockCopyEvents, { capture: true });
+          iframeDoc.addEventListener("paste", blockCopyEvents, {
+            capture: true,
+          });
+          iframeDoc.addEventListener("contextmenu", blockContextMenu, {
+            capture: true,
+          });
+          iframeDoc.addEventListener("keydown", blockShortcuts, {
+            capture: true,
+          });
+          iframeDoc.addEventListener("keyup", blockShortcuts, {
+            capture: true,
+          });
+        } catch (e) {
+          // Cross-origin iframe - event blocking will work at parent level
         }
-        return prev > 0 ? prev - 1 : 0;
-      });
-    }, 1000);
+      }
+    };
+
+    // Block iframe events on initial load and periodically
+    blockIframeEvents();
+    const iframeCheckInterval = setInterval(blockIframeEvents, 1000);
 
     return () => {
-      clearInterval(timerInterval);
-      clearInterval(clipboardInterval);
-      clearInterval(violationTimerRef.current);
-      if (warningTimeoutRef.current) clearTimeout(warningTimeoutRef.current);
-      window.open = originalWindowOpen; // Restore window.open
-      window.removeEventListener('blur', onBlur);
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-      window.removeEventListener('resize', onResize);
-      document.removeEventListener('fullscreenchange', onResize);
-      document.removeEventListener('contextmenu', block);
-      document.removeEventListener('copy', block);
-      document.removeEventListener('paste', block);
-      document.removeEventListener('cut', block);
-      document.removeEventListener('dragstart', blockDrag);
-      document.removeEventListener('drop', blockDrag);
-      document.removeEventListener('selectstart', blockSelect);
-      document.removeEventListener('keydown', keyBlock);
-      document.removeEventListener('keyup', keyUpBlock);
+      window.removeEventListener("blur", onBlur);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("keydown", blockShortcuts, { capture: true });
+      window.removeEventListener("keyup", blockShortcuts, { capture: true });
+      window.removeEventListener("copy", blockCopyEvents, { capture: true });
+      window.removeEventListener("cut", blockCopyEvents, { capture: true });
+      window.removeEventListener("paste", blockCopyEvents, { capture: true });
+      window.removeEventListener("contextmenu", blockContextMenu, {
+        capture: true,
+      });
+
+      document.removeEventListener("keydown", blockShortcuts, {
+        capture: true,
+      });
+      document.removeEventListener("keyup", blockShortcuts, { capture: true });
+      document.removeEventListener("copy", blockCopyEvents, { capture: true });
+      document.removeEventListener("cut", blockCopyEvents, { capture: true });
+      document.removeEventListener("paste", blockCopyEvents, { capture: true });
+      document.removeEventListener("contextmenu", blockContextMenu, {
+        capture: true,
+      });
+
+      clearInterval(iframeCheckInterval);
+      document.head.removeChild(globalStyle);
     };
-  }, [cieId, handleFocusLossStrike, showWarning, triggerScreenshotBlock]);
+  }, [cieId]);
+
+  useEffect(() => {
+    const timerInterval = setInterval(() => {
+      setTimeLeft((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(timerInterval);
+  }, []);
 
   const fetchSessionData = async () => {
-      const user = auth.currentUser;
-      if (!user) { router.push('/'); return; }
-
-      // Check for Native App securely via Electron IPC bridges
-      const isNative = typeof window !== 'undefined' && !!window.electronAPI;
-      
-      // Allow localhost for development, but in production this is HARD ENFORCED
-      const isDev = window.location.hostname === 'localhost';
-
-      if (!isNative && !isDev && cieId !== 'practice') {
+    try {
+      setLoading(true);
+      const subId = `${cieId}_${auth.currentUser?.uid}`;
+      const subDoc = await getDoc(doc(db, "submissions", subId));
+      let existingCodes = null;
+      if (subDoc.exists()) {
+        const data = subDoc.data();
+        if (data.status === "completed" || data.status === "locked") {
           setIsLocked(true);
-          lockedRef.current = true;
           setIsViolationOverlay(true);
-          overlayActiveRef.current = true;
-          setLoading(false);
-          loadingRef.current = false;
-          return;
+        }
+        existingCodes = data.codes;
       }
 
-      try {
-      // Practice Mode Bypass
-      if (cieId === 'practice') {
-          const progId = router.query.programNo || 1;
-          const prog = labsData.find(p => String(p.programNo) === String(progId));
-          setPrograms([prog]);
-          setCodes([prog.boilerplate || '']);
-          setTimeLeft(3600); // 1 hour for practice
-          setLoading(false);
-          loadingRef.current = false;
-          return;
+      const cieDoc = await getDoc(doc(db, "cies", cieId));
+      if (!cieDoc.exists() && cieId !== "practice") {
+        router.push("/student/dashboard");
+        return;
       }
 
-      const cieDoc = await getDoc(doc(db, 'cies', cieId));
-      if (!cieDoc.exists()) { router.push('/student/dashboard'); return; }
-      const cieData = cieDoc.data();
-      setCie(cieData);
+      let duration = 3600;
+      let startTime = new Date();
+      let selectedProgs = [labsData[0]];
 
-      // Initialize Submission
-      const subId = `${cieId}_${user.uid}`;
-      const subRef = doc(db, 'submissions', subId);
-      const subDoc = await getDoc(subRef);
-      if (!subDoc.exists()) {
-        await setDoc(subRef, { 
-          cieId, studentId: user.uid, status: 'ongoing', 
-          tabSwitchCount: 0, lastActive: Timestamp.now(), universityId: user.uid 
-        }, { merge: true });
-      } else if (subDoc.data().status === 'completed' || subDoc.data().status === 'locked') {
-        setIsLocked(true);
-        lockedRef.current = true;
-        setIsViolationOverlay(true);
-        overlayActiveRef.current = true;
+      if (cieId === "practice") {
+        selectedProgs = [labsData[0]];
+      } else {
+        const cieData = cieDoc.data();
+        const progIds = cieData.assignedProgramNos || [];
+        selectedProgs = progIds
+          .map((id) => labsData.find((p) => String(p.programNo) === String(id)))
+          .filter(Boolean);
+        duration = cieData.durationMinutes * 60;
+        startTime = cieData.startedAt?.toDate() || new Date();
       }
 
-      // Load Programs
-      const progIds = cieData.assignedProgramNos || [];
-      const selectedProgs = progIds.map(id => labsData.find(p => String(p.programNo) === String(id))).filter(Boolean);
       setPrograms(selectedProgs);
-      setCodes(selectedProgs.map(p => p.boilerplate || ''));
+      const sessionCodes = selectedProgs.map(
+        (p, i) => existingCodes?.[i] || p.boilerplate || "",
+      );
+      setCodes(sessionCodes);
+      setCompilationResults(selectedProgs.map(() => null));
 
-      // Timer Setup
-      let startTime = cieData.startedAt;
-      if (!startTime) {
-          startTime = Timestamp.now();
-          // This call now has correct permissions via updated rules
-          await updateDoc(doc(db, 'cies', cieId), { startedAt: startTime });
-      }
-      
-      const end = startTime.toDate().getTime() + (cieData.durationMinutes * 60000);
-      const remaining = Math.max(0, Math.floor((end - Date.now()) / 1000));
-      setTimeLeft(remaining);
-      
+      // ALWAYS default the Virtual Device (Preview) to a generic "Ready" screen on start
+      // This ensures previous student code doesn't leak into the Phone view initially.
+      setPreviewCode(HELLO_WORLD_DART);
+      setIframeKey(Date.now());
+
+      const elapsedSecs = Math.floor((Date.now() - startTime.getTime()) / 1000);
+      setTimeLeft(Math.max(0, duration - elapsedSecs));
       setLoading(false);
-      loadingRef.current = false;
-    } catch (error) { 
-      console.error("Session Init Error:", error);
+    } catch (e) {
+      console.error(e);
       setLoading(false);
-      loadingRef.current = false;
     }
   };
 
-  const resumeSession = () => {
-    if (lockedRef.current || submittingRef.current) return;
-    const el = document.documentElement;
-    if (el.requestFullscreen) {
-        el.requestFullscreen().then(() => {
-            setIsViolationOverlay(false);
-            overlayActiveRef.current = false;
-            setViolationTimeLeft(VIOLATION_COUNTDOWN_SECS);
-            clearInterval(violationTimerRef.current);
-            violationTimerRef.current = null;
-        }).catch(() => {
-            alert("Fullscreen is REQUIRED to resume. Please allow it.");
+  const handleFocusLossStrike = (reason) => {
+    if (
+      overlayActiveRef.current ||
+      lockedRef.current ||
+      loadingRef.current ||
+      submittingRef.current
+    )
+      return;
+    const now = Date.now();
+    if (now - lastStrikeTimeRef.current < STRIKE_COOLDOWN_MS) return;
+    lastStrikeTimeRef.current = now;
+    strikesRef.current += 1;
+    setStrikes(strikesRef.current);
+    setIsViolationOverlay(true);
+    if (strikesRef.current >= MAX_STRIKES) {
+      handleFinalLock("Security Policy: Maximum Violations");
+    } else {
+      violationTimerRef.current = setInterval(() => {
+        setViolationTimeLeft((p) => {
+          if (p <= 1) {
+            handleFinalLock("Security Policy: Timeout");
+            return 0;
+          }
+          return p - 1;
         });
+      }, 1000);
     }
   };
 
   const handleFinalLock = async (reason) => {
     setIsLocked(true);
-    lockedRef.current = true;
     setIsViolationOverlay(true);
-    overlayActiveRef.current = true;
     clearInterval(violationTimerRef.current);
-    violationTimerRef.current = null;
     try {
-        await updateDoc(doc(db, 'submissions', `${cieId}_${auth.currentUser?.uid}`), { 
-            status: 'locked', lockReason: reason, lockedAt: Timestamp.now() 
-        });
+      const subId = `${cieId}_${auth.currentUser?.uid}`;
+      await setDoc(
+        doc(db, "submissions", subId),
+        {
+          status: "locked",
+          lockReason: reason,
+          lockedAt: Timestamp.now(),
+        },
+        { merge: true },
+      );
     } catch (e) {}
   };
 
-  const handleRunCode = async () => {
-    if (!editorRef.current || !monacoRef.current) return;
-    const model = editorRef.current.getModel();
-    const markers = monacoRef.current.editor.getModelMarkers({ resource: model.uri });
+  const resumeSession = () => {
+    if (isLocked) return;
+    const isElectron = typeof window !== 'undefined' && window.electronAPI;
     
-    // Check if any marker is an Error (Severity 8)
-    const hasErrors = markers.some(m => m.severity === 8);
-
-    if (hasErrors) {
-      setCompilationResults(prev => {
-        const n = [...prev];
-        n[activeProgramIdx] = { 
-          output: `❌ BUILD FAILED\n> Errors detected in your code.\n> Please fix the highlighted red lines before running.`, 
-          status: 'error' 
-        };
-        return n;
-      });
-      return;
+    if (isElectron) {
+      document.documentElement
+        .requestFullscreen()
+        .then(() => {
+          setIsViolationOverlay(false);
+          setViolationTimeLeft(VIOLATION_COUNTDOWN_SECS);
+          clearInterval(violationTimerRef.current);
+        })
+        .catch(() => {});
+    } else {
+      // On web, just close the overlay without forcing fullscreen
+      setIsViolationOverlay(false);
+      setViolationTimeLeft(VIOLATION_COUNTDOWN_SECS);
+      clearInterval(violationTimerRef.current);
     }
+  };
 
-    const currentCode = codes[activeProgramIdx];
-    setCompilationResults(prev => { const n = [...prev]; n[activeProgramIdx] = { output: '⚡ RENDERING VIRTUAL UI...', status: 'loading' }; return n; });
+  const syncVirtualDevice = (code) => {
+    if (!code) return;
+    setPreviewCode(code); // Update the preview code state
+    setIsSyncing(true);
+    setIframeKey(Date.now()); // Hard reload iframe with new code
 
-    let ui = { appBar: null, bodyText: "Rendered View", hasButton: false, bgColor: '#fff' };
-    if (currentCode.includes('AppBar')) ui.appBar = (currentCode.match(/Text\(['"](.*?)['"]\)/) || [])[1] || "App";
-    if (currentCode.includes('Text')) ui.bodyText = (currentCode.match(/Text\(['"](.*?)['"]\)/g) || []).pop()?.match(/['"](.*?)['"]/)?.[1] || "Hello";
-    ui.hasButton = currentCode.includes('Button');
-
-    setTimeout(() => {
-      setPreviewUI(ui);
-      setCompilationResults(prev => {
-        const n = [...prev];
-        n[activeProgramIdx] = { output: "> Compilation Successful\n> UI Syncing Complete\n> No Errors Found", status: 'success' };
-        return n;
-      });
+    let attempts = 0;
+    const interval = setInterval(() => {
+      if (iframeRef.current?.contentWindow) {
+        iframeRef.current.contentWindow.postMessage(
+          { type: "sourceCode", sourceCode: code },
+          "*",
+        );
+        iframeRef.current.contentWindow.postMessage({ type: "run" }, "*");
+        attempts++;
+      }
+      if (attempts > 5) {
+        clearInterval(interval);
+        setIsSyncing(false);
+      }
     }, 600);
   };
 
-  const handleSubmitClick = () => {
-    setShowSubmitConfirm(true);
+  const handleRunCode = async (forceCode = null) => {
+    const currentCode = forceCode || editorRef.current?.getValue();
+    if (!currentCode) return;
+
+    setCompilationResults((prev) => {
+      const n = [...prev];
+      n[activeProgramIdx] = {
+        output: "⚡ COMPILING & DEPLOYING...",
+        status: "loading",
+      };
+      return n;
+    });
+
+    try {
+      const res = await axios.post("/api/compile", {
+        source: currentCode,
+        mode: "analyze",
+      });
+      setCompilationResults((prev) => {
+        const n = [...prev];
+        n[activeProgramIdx] = {
+          output: res.data.output,
+          status: res.data.status,
+        };
+        return n;
+      });
+
+      if (res.data.status === "success") {
+        syncVirtualDevice(currentCode);
+      }
+    } catch (e) {
+      setCompilationResults((prev) => {
+        const n = [...prev];
+        n[activeProgramIdx] = { output: "⚠️ SDK FAILURE.", status: "error" };
+        return n;
+      });
+    }
   };
 
-  const cancelSubmit = () => {
-    setShowSubmitConfirm(false);
+  const handleCodeChange = (v) => {
+    const n = [...codes];
+    n[activeProgramIdx] = v;
+    setCodes(n);
+
+    if (monacoRef.current) {
+      runDartLinter(
+        v,
+        monacoRef.current,
+        editorRef.current.getModel(),
+        programs[activeProgramIdx],
+      );
+    }
+
+    // AUTO-SYNC REMOVED PER USER REQUEST TO PREVENT FOCUS JUMPING
+    // Student must now click "RUN BUILD" to sync the virtual device.
   };
 
   const confirmSubmit = async () => {
-    setShowSubmitConfirm(false);
     setSubmitting(true);
-    submittingRef.current = true;
     try {
       const subId = `${cieId}_${auth.currentUser?.uid}`;
-      await updateDoc(doc(db, 'submissions', subId), { codes, submittedAt: Timestamp.now(), status: 'completed' });
-      
-      // Auto-trigger scoring
-      try {
-        await axios.post('/api/submissions/score', {
-          submissionId: subId, 
-          studentCode: codes.join('\n\n--- NEXT PROGRAM ---\n\n'), 
-          programTitle: programs.map(p => p.title).join(', '), 
-          programDescription: programs.map(p => p.description).join('\n\n')
-        });
-      } catch (scoreErr) { console.error("Scoring hit a snag, but code was submitted."); }
-
-      router.push('/student/dashboard');
-    } catch (e) { 
-      setSubmitting(false); 
-      submittingRef.current = false;
-      alert("Submission failed. Try again.");
+      await setDoc(
+        doc(db, "submissions", subId),
+        {
+          codes,
+          submittedAt: Timestamp.now(),
+          status: "completed",
+        },
+        { merge: true },
+      );
+      router.push("/student/dashboard");
+    } catch (e) {
+      setSubmitting(false);
+      alert("Submission Error.");
     }
   };
 
-  const handleFormatCode = () => {
-    if (editorRef.current) {
-      editorRef.current.getAction('editor.action.formatDocument').run();
-    }
-  };
-
-  // Thin wrapper — actual rules live in lib/dartLinter.js
-  const validateCodeContent = (val) => {
-    if (!editorRef.current || !monacoRef.current) return;
-    const model = editorRef.current.getModel();
-    // Pass current program so linter can detect off-topic code
-    const currentProgram = programs[activeProgramIdx] || null;
-    runDartLinter(val, monacoRef.current, model, currentProgram);
-  };
-
-  if (loading) return <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#020617', color: '#10b981', fontFamily: 'monospace' }}>⚡ ESTABLISHING SECURE CONNECTION...</div>;
+  if (!mounted || loading)
+    return (
+      <div
+        style={{
+          height: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "#020617",
+          color: "#10b981",
+          fontFamily: "monospace",
+        }}
+      >
+        Establishing Connection...
+      </div>
+    );
 
   return (
-    <div style={{ background: '#020617', height: '100vh', overflow: 'hidden', color: '#e2e8f0' }}>
+    <div
+      style={{
+        background: "#020617",
+        height: "100vh",
+        overflow: "hidden",
+        color: "#e2e8f0",
+        fontFamily: "Inter, sans-serif",
+      }}
+    >
       <Head>
-        <title>SECURE TERMINAL | CIE</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0"/>
+        <title>
+          CIE PORTAL | {programs[activeProgramIdx]?.title || "SESSION"}
+        </title>
       </Head>
 
-      {/* ════════════════════════════════════════════
-          SCREENSHOT BLOCKED OVERLAY (non-strike)
-          ════════════════════════════════════════════ */}
-      {showScreenshotBlock && (
-        <div style={{
-          position: 'fixed', inset: 0, zIndex: 100000,
-          background: 'rgba(0, 0, 0, 0.95)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          animation: 'fadeIn 0.15s ease-out'
-        }}>
-          <div style={{
-            textAlign: 'center', maxWidth: '480px', padding: '50px 40px',
-            background: 'linear-gradient(135deg, #1a0000 0%, #0a0000 100%)',
-            border: '2px solid #ef4444', borderRadius: '24px',
-            boxShadow: '0 0 60px rgba(239, 68, 68, 0.3), 0 0 120px rgba(239, 68, 68, 0.1)'
-          }}>
-            <div style={{
-              width: '80px', height: '80px', borderRadius: '50%',
-              background: 'rgba(239, 68, 68, 0.15)', border: '2px solid #ef4444',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              margin: '0 auto 24px', animation: 'pulse 1s infinite'
-            }}>
-              <CameraOff size={40} color="#ef4444" />
-            </div>
-            <h2 style={{ color: '#ef4444', fontSize: '24px', fontWeight: '900', margin: '0 0 12px', letterSpacing: '2px' }}>
-              SCREENSHOT BLOCKED
-            </h2>
-            <p style={{ color: '#f87171', fontSize: '15px', margin: '0 0 8px', fontWeight: '600' }}>
-              You cannot take screenshots in this application.
-            </p>
-            <p style={{ color: '#64748b', fontSize: '13px', margin: 0 }}>
-              Screen capture is disabled by the CIE Proctoring System.<br/>
-              This attempt has been logged and reported.
-            </p>
-            <div style={{
-              marginTop: '24px', padding: '12px 20px',
-              background: 'rgba(239, 68, 68, 0.1)', borderRadius: '12px',
-              border: '1px solid rgba(239, 68, 68, 0.2)',
-              color: '#f87171', fontSize: '11px', letterSpacing: '1px', fontWeight: 'bold'
-            }}>
-              🛡️ CONTENT PROTECTION ACTIVE
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ════════════════════════════════════════════
-          CUSTOM SUBMIT CONFIRMATION MODAL
-          ════════════════════════════════════════════ */}
-      {showSubmitConfirm && !isViolationOverlay && (
-        <div style={{ 
-            position: 'fixed', inset: 0, zIndex: 100000, background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(10px)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' 
-        }}>
-          <div className="premium-card" style={{ maxWidth: '450px', width: '100%', textAlign: 'center', border: '1px solid #1e293b', background: '#020617' }}>
-            <AlertCircle size={64} color="#3b82f6" style={{ margin: '0 auto 20px' }} />
-            <h2 style={{ color: '#f8fafc', fontSize: '24px', marginBottom: '10px' }}>Submit Evaluation?</h2>
-            <p style={{ color: '#94a3b8', fontSize: '15px', marginBottom: '30px', lineHeight: '1.6' }}>
-              Are you sure you want to finish and submit? You will not be able to change your code after submitting.
-            </p>
-            <div style={{ display: 'flex', gap: '15px', justifyContent: 'center' }}>
-                <button onClick={cancelSubmit} style={{ flex: 1, padding: '14px', background: '#0f172a', border: '1px solid #334155', color: '#f8fafc', borderRadius: '12px', cursor: 'pointer', fontWeight: 'bold' }}>
-                    CANCEL
-                </button>
-                <button onClick={confirmSubmit} style={{ flex: 1, padding: '14px', background: '#3b82f6', border: 'none', color: '#fff', borderRadius: '12px', cursor: 'pointer', fontWeight: 'bold' }}>
-                    YES, SUBMIT
-                </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ════════════════════════════════════════════
-          WARNING TOAST (non-strike, auto-dismiss)
-          ════════════════════════════════════════════ */}
-      {warningMessage && !isViolationOverlay && !showScreenshotBlock && (
-        <div style={{
-          position: 'fixed', top: '80px', left: '50%', transform: 'translateX(-50%)',
-          zIndex: 99998, padding: '14px 28px', borderRadius: '16px',
-          background: 'rgba(245, 158, 11, 0.15)', border: '1px solid #f59e0b',
-          backdropFilter: 'blur(12px)',
-          color: '#fbbf24', fontSize: '14px', fontWeight: '600',
-          boxShadow: '0 8px 32px rgba(245, 158, 11, 0.2)',
-          animation: 'slideDown 0.3s ease-out',
-          display: 'flex', alignItems: 'center', gap: '10px'
-        }}>
-          <AlertTriangle size={18} /> {warningMessage}
-        </div>
-      )}
-
-      {/* ════════════════════════════════════════════
-          STRIKE VIOLATION OVERLAY (focus loss only)
-          ════════════════════════════════════════════ */}
       {isViolationOverlay && (
-        <div style={{ 
-            position: 'fixed', inset: 0, zIndex: 99999, background: '#000', 
-            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' 
-        }}>
-          <div className="premium-card" style={{ maxWidth: '500px', width: '100%', textAlign: 'center', border: `2px solid ${isLocked ? '#ef4444' : '#f59e0b'}`, background: '#020617' }}>
-            {isLocked ? <Lock size={64} color="#ef4444" style={{ margin: '0 auto 20px' }} /> : <ShieldAlert size={64} color="#f59e0b" style={{ margin: '0 auto 20px' }} />}
-            <h2 style={{ color: isLocked ? '#ef4444' : '#f59e0b', fontSize: '28px', marginBottom: '10px' }}>{isLocked ? 'SESSION PERMANENTLY LOCKED' : 'FOCUS LOSS DETECTED'}</h2>
-            
-            <div style={{ background: 'rgba(255,255,255,0.05)', padding: '25px', borderRadius: '20px', margin: '20px 0' }}>
-               <p style={{ color: '#94a3b8', fontSize: '14px', marginBottom: '10px' }}>{isLocked ? 'Status:' : 'Strike Recorded:'}</p>
-               <p style={{ color: '#fff', fontWeight: 'bold', fontSize: '18px' }}>{isLocked ? 'This session has been permanently locked due to violations.' : 'You left the exam window. Return to fullscreen immediately.'}</p>
-               
-               {!isLocked && (
-                 <div style={{ marginTop: '20px' }}>
-                    <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '5px' }}>AUTO-LOCK IN:</div>
-                    <div style={{ fontSize: '56px', fontWeight: '900', color: '#ef4444' }}>{violationTimeLeft}s</div>
-                 </div>
-               )}
-            </div>
-
-            <div style={{ display: 'flex', justifyContent: 'center', gap: '30px', marginBottom: '30px' }}>
-                <div>
-                    <div style={{ fontSize: '10px', color: '#64748b', letterSpacing: '1px' }}>STRIKE COUNT</div>
-                    <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#ef4444' }}>{strikes} / {MAX_STRIKES}</div>
-                </div>
-                <div>
-                    <div style={{ fontSize: '10px', color: '#64748b', letterSpacing: '1px' }}>CHANCES LEFT</div>
-                    <div style={{ fontSize: '24px', fontWeight: 'bold', color: strikes >= MAX_STRIKES ? '#ef4444' : '#10b981' }}>{Math.max(0, MAX_STRIKES - strikes)}</div>
-                </div>
-            </div>
-
-            {!isLocked && strikes < MAX_STRIKES && (
-              <div style={{
-                background: 'rgba(245, 158, 11, 0.1)', padding: '12px 16px', borderRadius: '12px',
-                border: '1px solid rgba(245, 158, 11, 0.2)', marginBottom: '20px',
-                color: '#fbbf24', fontSize: '12px', fontWeight: '600'
-              }}>
-                ⚠️ {MAX_STRIKES - strikes === 1 ? 'FINAL WARNING: Next focus loss will PERMANENTLY LOCK your exam!' : `${MAX_STRIKES - strikes} strikes remaining before permanent lock.`}
-              </div>
-            )}
-
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 10000,
+            background: "#000",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <div
+            style={{
+              background: "#0f172a",
+              padding: "40px",
+              borderRadius: "20px",
+              textAlign: "center",
+              border: `2px solid ${isLocked ? "#ef4444" : "#f59e0b"}`,
+            }}
+          >
             {isLocked ? (
-                <div style={{ display: 'flex', gap: '10px' }}>
-                    <button className="btn btn-primary" style={{ flex: 1, background: '#1e293b' }} onClick={() => router.push('/student/dashboard')}>BACK TO DASHBOARD</button>
-                    {typeof window !== 'undefined' && window.electronAPI && (
-                        <button className="btn btn-primary" style={{ flex: 1, background: '#ef4444' }} onClick={() => window.electronAPI.quitApp()}>CLOSE TERMINAL</button>
-                    )}
-                </div>
+              <Lock size={64} color="#ef4444" />
             ) : (
-                <button className="btn btn-primary" style={{ width: '100%', background: '#10b981', color: '#000' }} onClick={resumeSession}>
-                  RETURN TO FULLSCREEN & RESUME
-                </button>
+              <ShieldAlert size={64} color="#f59e0b" />
             )}
+            <h2
+              style={{
+                color: isLocked ? "#ef4444" : "#f59e0b",
+                margin: "20px 0",
+              }}
+            >
+              {isLocked ? "EXAM LOCKED" : "SECURITY STRIKE"}
+            </h2>
+            {!isLocked && (
+              <h1 style={{ fontSize: "64px", color: "#ef4444" }}>
+                {violationTimeLeft}s
+              </h1>
+            )}
+            <button
+              onClick={
+                isLocked
+                  ? () => router.push("/student/dashboard")
+                  : resumeSession
+              }
+              style={{
+                padding: "15px 40px",
+                borderRadius: "10px",
+                background: isLocked ? "#1e293b" : "#10b981",
+                color: isLocked ? "#fff" : "#000",
+                border: "none",
+                fontWeight: "900",
+                cursor: "pointer",
+              }}
+            >
+              {isLocked ? "EXIT" : "RESUME"}
+            </button>
           </div>
         </div>
       )}
 
-      {/* MAIN TOP BAR */}
-      <header style={{ height: '70px', background: '#0f172a', borderBottom: '1px solid #1e293b', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 30px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
-          <ShieldCheck color="#10b981" />
-          <div>
-            <div style={{ fontSize: '10px', color: '#64748b', letterSpacing: '2px', fontWeight: 'bold' }}>SYSTEM STATUS</div>
-            <div style={{ fontSize: '14px', color: '#10b981', fontWeight: 'bold' }}>PROCTORING ACTIVE</div>
-          </div>
-          <div style={{ width: '1px', height: '30px', background: '#1e293b' }}></div>
-          <div style={{ 
-            fontSize: '12px', fontWeight: 'bold', padding: '4px 12px', borderRadius: '8px',
-            background: strikes === 0 ? 'rgba(16, 185, 129, 0.1)' : strikes < MAX_STRIKES ? 'rgba(245, 158, 11, 0.15)' : 'rgba(239, 68, 68, 0.15)',
-            color: strikes === 0 ? '#10b981' : strikes < MAX_STRIKES ? '#f59e0b' : '#ef4444',
-            border: `1px solid ${strikes === 0 ? '#10b981' : strikes < MAX_STRIKES ? '#f59e0b' : '#ef4444'}`
-          }}>
-            STRIKES: {strikes}/{MAX_STRIKES}
-          </div>
+      <header
+        style={{
+          height: "60px",
+          background: "#0f172a",
+          borderBottom: "1px solid #1e293b",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "0 30px",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <ShieldCheck size={20} color="#10b981" />
+          <span
+            style={{
+              fontSize: "11px",
+              fontWeight: "900",
+              color: "#10b981",
+              letterSpacing: "1.5px",
+            }}
+          >
+            TERMINAL V4.3
+          </span>
         </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: '30px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '15px', background: '#020617', padding: '8px 20px', borderRadius: '14px', border: '1px solid #1e293b' }}>
-            <Clock size={18} color="#10b981" />
-            <span style={{ fontFamily: 'monospace', fontSize: '22px', fontWeight: 'bold', color: '#10b981' }}>
-                {Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}
-            </span>
+        <div style={{ display: "flex", gap: "5px" }}>
+          {programs.map((p, i) => (
+            <button
+              key={i}
+              onClick={() => {
+                setActiveProgramIdx(i);
+                setCompilationResults(selectedProgs.map(() => null));
+              }}
+              style={{
+                padding: "6px 16px",
+                borderRadius: "8px",
+                background: activeProgramIdx === i ? "#10b981" : "#1e293b",
+                color: activeProgramIdx === i ? "#000" : "#64748b",
+                border: "none",
+                fontWeight: "900",
+                fontSize: "10px",
+              }}
+            >
+              {p.title || `P${i + 1}`}
+            </button>
+          ))}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
+          <div
+            style={{
+              color: "#10b981",
+              fontWeight: "900",
+              fontSize: "18px",
+              display: "flex",
+              gap: "8px",
+            }}
+          >
+            <Clock size={18} /> {Math.floor(timeLeft / 60)}:
+            {(timeLeft % 60).toString().padStart(2, "0")}
           </div>
-          <button className="btn btn-primary" disabled={submitting} style={{ background: '#10b981', color: '#000', fontWeight: 'bold' }} onClick={handleSubmitClick}>
-            {submitting ? 'SUBMITTING...' : 'FINISH EVALUATION'}
+          <button
+            onClick={() => setShowSubmitConfirm(true)}
+            style={{
+              background: "#ef4444",
+              color: "#fff",
+              padding: "8px 25px",
+              borderRadius: "10px",
+              border: "none",
+              fontWeight: "900",
+              fontSize: "11px",
+            }}
+          >
+            FINISH
           </button>
         </div>
       </header>
 
-      <main style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 70px)', userSelect: 'none', background: '#020617' }}>
-        
-        {/* ═══ TOP TABS: PROGRAM QUEUE ═══ */}
-        <nav style={{ height: '60px', borderBottom: '1px solid #1e293b', background: '#020617', display: 'flex', alignItems: 'center', padding: '0 30px', gap: '20px' }}>
-          <div style={{ fontSize: '11px', color: '#64748b', fontWeight: 'bold', letterSpacing: '2px', marginRight: '10px' }}>PROGRAM QUEUE</div>
-          <div style={{ display: 'flex', gap: '8px', flex: 1, overflowX: 'auto' }}>
-            {programs.map((p, i) => (
-              <button 
-                key={i} 
-                onClick={() => setActiveProgramIdx(i)}
+      <main
+        style={{
+          display: "flex",
+          height: "calc(100vh - 60px)",
+          padding: "10px",
+          gap: "10px",
+        }}
+      >
+        <aside
+          style={{
+            width: "260px",
+            display: "flex",
+            flexDirection: "column",
+            gap: "10px",
+          }}
+        >
+          <div
+            style={{
+              flex: 1,
+              background: "#070c18",
+              borderRadius: "16px",
+              border: "1px solid #1e293b",
+              padding: "20px",
+              overflowY: "auto",
+            }}
+          >
+            <div
+              style={{
+                fontSize: "9px",
+                color: "#10b981",
+                fontWeight: "900",
+                marginBottom: "15px",
+              }}
+            >
+              STRIKE STATUS
+            </div>
+            <div
+              style={{
+                height: "4px",
+                background: "#020617",
+                borderRadius: "2px",
+                marginBottom: "20px",
+              }}
+            >
+              <div
                 style={{
-                  padding: '8px 20px', borderRadius: '12px', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer', transition: 'all 0.2s',
-                  background: activeProgramIdx === i ? 'rgba(16, 185, 129, 0.15)' : 'transparent',
-                  border: `1px solid ${activeProgramIdx === i ? '#10b981' : '#1e293b'}`,
-                  color: activeProgramIdx === i ? '#10b981' : '#64748b'
+                  width: (strikes / MAX_STRIKES) * 100 + "%",
+                  height: "100%",
+                  background: "#ef4444",
+                  transition: "0.3s",
+                }}
+              ></div>
+            </div>
+            <h6
+              style={{
+                color: "#64748b",
+                fontSize: "9px",
+                fontWeight: "900",
+                marginBottom: "10px",
+              }}
+            >
+              REQUIREMENTS
+            </h6>
+            <p
+              style={{ fontSize: "12px", color: "#94a3b8", lineHeight: "1.8" }}
+            >
+              {programs[activeProgramIdx]?.description}
+            </p>
+          </div>
+          <div
+            style={{
+              padding: "15px",
+              background: "#070c18",
+              borderRadius: "16px",
+              border: "1px solid #1e293b",
+              textAlign: "center",
+            }}
+          >
+            <Terminal
+              size={16}
+              color="#10b981"
+              style={{ marginBottom: "10px" }}
+            />
+            <div
+              style={{ fontSize: "10px", color: "#64748b", fontWeight: "bold" }}
+            >
+              Manual Build Mode
+            </div>
+          </div>
+        </aside>
+
+        <section
+          style={{
+            flex: 1,
+            background: "#0f172a",
+            borderRadius: "20px",
+            border: "1px solid #1e293b",
+            overflow: "hidden",
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          <div
+            style={{
+              height: "40px",
+              background: "rgba(0,0,0,0.4)",
+              display: "flex",
+              alignItems: "center",
+              padding: "0 20px",
+              justifyContent: "space-between",
+              borderBottom: "1px solid rgba(255,255,255,0.05)",
+            }}
+          >
+            <span
+              style={{ fontSize: "10px", fontWeight: "900", color: "#64748b" }}
+            >
+              EDITOR
+            </span>
+            <button
+              onClick={() =>
+                editorRef.current
+                  ?.getAction("editor.action.formatDocument")
+                  ?.run()
+              }
+              style={{
+                color: "#10b981",
+                background: "transparent",
+                border: "none",
+                fontSize: "10px",
+                fontWeight: "bold",
+              }}
+            >
+              FORMAT
+            </button>
+          </div>
+          <div style={{ flex: 1 }}>
+            <MonacoEditor
+              height="100%"
+              language="dart"
+              theme="vs-dark"
+              value={codes[activeProgramIdx]}
+              options={{
+                fontSize: 16,
+                minimap: { enabled: false },
+                automaticLayout: true,
+                contextmenu: false,
+                copyWithSyntaxHighlighting: false,
+                readOnly: false,
+              }}
+              onMount={(editor, monaco) => {
+                editorRef.current = editor;
+                monacoRef.current = monaco;
+
+                // Register professional IntelliSense
+                registerDartIntellisense(monaco);
+
+                // Block copy/paste/cut/save commands in Monaco editor (Ctrl/Cmd and Win/Meta)
+                [
+                  monaco.KeyCode.KeyC,
+                  monaco.KeyCode.KeyV,
+                  monaco.KeyCode.KeyX,
+                  monaco.KeyCode.KeyS,
+                ].forEach((k) => {
+                  editor.addCommand(monaco.KeyMod.CtrlCmd | k, () => {});
+                  editor.addCommand(monaco.KeyMod.WinCtrl | k, () => {});
+                });
+
+                // Block Shift+Insert
+                editor.addCommand(
+                  monaco.KeyMod.Shift | monaco.KeyCode.Insert,
+                  () => {},
+                );
+              }}
+              onChange={handleCodeChange}
+            />
+          </div>
+        </section>
+
+        <aside
+          style={{
+            width: "420px",
+            display: "flex",
+            flexDirection: "column",
+            gap: "10px",
+          }}
+          data-preview-container
+        >
+          <div
+            style={{
+              height: "580px",
+              width: "280px",
+              background: "#020617",
+              borderRadius: "40px",
+              border: "12px solid #1e293b",
+              overflow: "hidden",
+              position: "relative",
+              boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.5)",
+              margin: "0 auto",
+            }}
+            data-preview-container
+          >
+            {/* Phone Notch/Speaker */}
+            <div
+              style={{
+                position: "absolute",
+                top: 0,
+                left: "50%",
+                transform: "translateX(-50%)",
+                width: "120px",
+                height: "25px",
+                background: "#1e293b",
+                borderBottomLeftRadius: "15px",
+                borderBottomRightRadius: "15px",
+                zIndex: 20,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: "8px",
+              }}
+            >
+              <div
+                style={{
+                  width: "40px",
+                  height: "4px",
+                  background: "#0f172a",
+                  borderRadius: "2px",
+                }}
+              ></div>
+              <div
+                style={{
+                  width: "6px",
+                  height: "6px",
+                  background: "#0f172a",
+                  borderRadius: "50%",
+                }}
+              ></div>
+            </div>
+
+            <div style={{ position: "relative", height: "100%" }}>
+              <iframe
+                ref={iframeRef}
+                key={iframeKey}
+                src={`https://dartpad.dev/embed-flutter.html?theme=light&run=true&split=1&code=${encodeURIComponent(
+                  previewCode,
+                )}&t=${iframeKey}`}
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  border: "none",
+                }}
+                sandbox="allow-scripts allow-same-origin"
+                onLoad={() => {
+                  // HARD RESET: Immediately push the initial code to overwrite any cached DartPad session
+                  if (iframeRef.current?.contentWindow) {
+                    const win = iframeRef.current.contentWindow;
+                    // Send multiple times to ensure it's caught as the compiler starts
+                    [500, 1000, 2000].forEach((delay) => {
+                      setTimeout(() => {
+                        win.postMessage(
+                          { type: "sourceCode", sourceCode: previewCode },
+                          "*",
+                        );
+                        win.postMessage({ type: "run" }, "*");
+                      }, delay);
+                    });
+                  }
+
+                  // Attempt to hide code panel via CSS injection (fallback for older embeds)
+                  try {
+                    const iframeDoc = iframeRef.current?.contentDocument;
+                    if (iframeDoc) {
+                      const style = iframeDoc.createElement("style");
+                      style.textContent = `
+                        .code-panel, .editor, [data-code], .dart-code, .header {
+                          display: none !important;
+                        }
+                        .output-panel, .preview, .console {
+                          width: 100% !important;
+                        }
+                      `;
+                      iframeDoc.head.appendChild(style);
+                    }
+                  } catch (e) {
+                    // Cross-origin - CSS injection may not work, split=1 is the primary fix
+                  }
+                }}
+              />
+              {/* Partial Security Overlay: Blocks the top toolbar and internal DartPad tabs (Code/Output) */}
+              <div
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  height: "80px", // Increased to cover internal tabs
+                  zIndex: 10,
+                  background: "transparent",
+                  cursor: "not-allowed",
+                }}
+                title="Direct interaction with virtual device controls is disabled."
+              />
+            </div>
+          </div>
+          <div
+            style={{
+              flex: 1,
+              background: "#010409",
+              borderRadius: "20px",
+              border: "1px solid #1e293b",
+              overflow: "hidden",
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            <div
+              style={{
+                height: "35px",
+                background: "#020617",
+                borderBottom: "1px solid #1e293b",
+                display: "flex",
+                alignItems: "center",
+                padding: "0 15px",
+                gap: "10px",
+              }}
+            >
+              <Terminal size={14} color="#64748b" />
+              <span
+                style={{ fontSize: "9px", fontWeight: "900", color: "#64748b" }}
+              >
+                DEBUG CONSOLE
+              </span>
+              <div style={{ flex: 1 }}></div>
+              <button
+                onClick={() => handleRunCode()}
+                style={{
+                  background: "#10b981",
+                  color: "#000",
+                  padding: "4px 15px",
+                  borderRadius: "6px",
+                  fontSize: "10px",
+                  fontWeight: "900",
+                  border: "none",
+                  cursor: "pointer",
                 }}
               >
-                {i+1}. {p.title}
+                RUN BUILD
               </button>
-            ))}
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
-             <div style={{ height: '24px', width: '1px', background: '#1e293b' }} />
-             <div style={{ fontSize: '11px', color: '#10b981', fontWeight: 'bold' }}>VERSION 4.2.0 | SECURE</div>
-          </div>
-        </nav>
-
-        <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-          {/* ═══ LEFT SIDEBAR: MOBILE CONSOLE ═══ */}
-          <aside style={{ width: '420px', borderRight: '1px solid #1e293b', background: '#020617', display: 'flex', flexDirection: 'column', padding: '25px', gap: '20px' }}>
-            
-            {/* Requirements Box */}
-            <div style={{ background: '#0f172a', padding: '20px', borderRadius: '24px', border: '1px solid #1e293b' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
-                <FileText size={14} color="#10b981" />
-                <h5 style={{ fontSize: '11px', color: '#10b981', letterSpacing: '1px', margin: 0 }}>REQUIREMENTS</h5>
-              </div>
-              <div style={{ fontSize: '13px', lineHeight: '1.6', color: '#94a3b8' }}>{programs[activeProgramIdx]?.description}</div>
             </div>
-
-            {/* LARGE VIRTUAL DEVICE */}
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '15px' }}>
-               <div style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 'bold', letterSpacing: '1px' }}>VIRTUAL DEVICE PREVIEW</div>
-                  <div style={{ display: 'flex', gap: '4px' }}>
-                     <button onClick={() => setDeviceScale(s => Math.max(0.6, s - 0.1))} style={{ background: '#1e293b', border: '1px solid #334155', color: '#94a3b8', borderRadius: '6px', width: '24px', height: '24px' }}>-</button>
-                     <span style={{ fontSize: '10px', color: '#64748b', minWidth: '35px', textAlign: 'center' }}>{Math.round(deviceScale * 100)}%</span>
-                     <button onClick={() => setDeviceScale(s => Math.min(1.4, s + 0.1))} style={{ background: '#1e293b', border: '1px solid #334155', color: '#94a3b8', borderRadius: '6px', width: '24px', height: '24px' }}>+</button>
-                  </div>
-               </div>
-
-               <div style={{ 
-                  width: (280 * deviceScale) + 'px', 
-                  height: (540 * deviceScale) + 'px', // Taller for Mobile-First look
-                  background: '#1a1a2e', borderRadius: (40 * deviceScale) + 'px',
-                  border: Math.max(6, Math.round(12 * deviceScale)) + 'px solid #1e293b',
-                  boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)', overflow: 'hidden',
-                  display: 'flex', flexDirection: 'column', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
-               }}>
-                  {/* Status Bar */}
-                  <div style={{ height: (24 * deviceScale) + 'px', background: previewUI?.appBar ? '#0284c7' : '#0f172a', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 15px' }}>
-                    <span style={{ fontSize: (9 * deviceScale) + 'px', color: 'rgba(255,255,255,0.8)', fontWeight: 'bold' }}>9:41</span>
-                    <div style={{ display: 'flex', gap: (4 * deviceScale) + 'px' }}>
-                      <Activity size={10 * deviceScale} color="rgba(255,255,255,0.8)" />
-                      <Clock size={10 * deviceScale} color="rgba(255,255,255,0.8)" />
-                    </div>
-                  </div>
-
-                  {/* AppBar with Visual Mirror Highlight */}
-                  {previewUI?.appBar && (
-                    <div style={{ 
-                      background: '#0284c7', 
-                      padding: (12 * deviceScale) + 'px ' + (15 * deviceScale) + 'px', 
-                      color: 'white', fontSize: (14 * deviceScale) + 'px', fontWeight: 'bold',
-                      borderBottom: activeSymbol === 'AppBar' ? `${3 * deviceScale}px solid #10b981` : 'none',
-                      boxShadow: activeSymbol === 'AppBar' ? 'inset 0 0 20px rgba(16, 185, 129, 0.3)' : 'none'
-                    }}>
-                      {previewUI.appBar}
-                    </div>
-                  )}
-
-                  {/* Body with Visual Mirror Highlights */}
-                  <div style={{ flex: 1, overflowY: 'auto', background: previewUI?.bgColor || '#f1f5f9', padding: (15 * deviceScale) + 'px' }}>
-                    {previewUI ? (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: (12 * deviceScale) + 'px' }}>
-                         <div style={{ 
-                            fontSize: (15 * deviceScale) + 'px', color: '#0f172a', fontWeight: '500',
-                            padding: (8 * deviceScale) + 'px', borderRadius: (8 * deviceScale) + 'px',
-                            background: activeSymbol === 'Text' ? 'rgba(16, 185, 129, 0.1)' : 'transparent',
-                            border: activeSymbol === 'Text' ? '1px solid #10b981' : '1px solid transparent'
-                         }}>
-                           {previewUI.bodyText}
-                         </div>
-                         {previewUI.hasButton && (
-                            <div style={{ 
-                               background: '#0284c7', color: 'white', padding: (12 * deviceScale) + 'px', 
-                               borderRadius: (12 * deviceScale) + 'px', textAlign: 'center', fontWeight: 'bold',
-                               fontSize: (13 * deviceScale) + 'px', cursor: 'pointer',
-                               boxShadow: activeSymbol === 'ElevatedButton' ? '0 0 15px #10b981' : 'none',
-                               transform: activeSymbol === 'ElevatedButton' ? 'scale(1.02)' : 'scale(1)',
-                               transition: 'all 0.2s'
-                            }}>
-                              SUBMIT DATA
-                            </div>
-                         )}
-                      </div>
-                    ) : (
-                      <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontSize: (11 * deviceScale) + 'px', textAlign: 'center', padding: '20px' }}>
-                        Build your Flutter app and run it to see the result here.
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Home Bar */}
-                  <div style={{ height: (20 * deviceScale) + 'px', background: '#0f172a', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                     <div style={{ width: (60 * deviceScale) + 'px', height: '4px', background: '#334155', borderRadius: '10px' }} />
-                  </div>
-               </div>
+            <div style={{ flex: 1, padding: "12px", overflowY: "auto" }}>
+              <pre
+                style={{
+                  margin: 0,
+                  fontSize: "12px",
+                  color:
+                    compilationResults[activeProgramIdx]?.status === "error"
+                      ? "#f87171"
+                      : "#10b981",
+                  whiteSpace: "pre-wrap",
+                }}
+              >
+                {compilationResults[activeProgramIdx]?.output ||
+                  "> Waiting for build..."}
+              </pre>
             </div>
-          </aside>
-
-          {/* ═══ CENTER: THE COCKPIT EDITOR ═══ */}
-          <section style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#0f172a', position: 'relative' }}>
-             {/* Integrated AI Pair Proctor Bar (Unique) */}
-             <div style={{ height: '45px', background: 'rgba(2, 6, 23, 0.8)', borderBottom: '1px solid #1e293b', display: 'flex', alignItems: 'center', padding: '0 20px', zIndex: 10 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1 }}>
-                   <div style={{ width: '8px', height: '8px', background: '#10b981', borderRadius: '50%', boxShadow: '0 0 10px #10b981' }} />
-                   <p style={{ fontSize: '11px', color: '#10b981', fontWeight: '600', margin: 0 }}>AI PAIR PROCTOR:</p>
-                   <p style={{ fontSize: '11px', color: '#94a3b8', margin: 0, fontStyle: 'italic' }}>{proctorTip}</p>
-                </div>
-                <div style={{ display: 'flex', gap: '15px' }}>
-                    <div style={{ fontSize: '10px', color: '#64748b' }}>SQUIGGLES: <span style={{ color: '#f59e0b' }}>ON</span></div>
-                    <div style={{ fontSize: '10px', color: '#64748b' }}>SECURITY: <span style={{ color: '#10b981' }}>AIRTIGHT</span></div>
-                </div>
-             </div>
-
-             <div style={{ flex: 1, position: 'relative' }}>
-                {isViolationOverlay ? (
-                  <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#020617', color: '#64748b' }}>
-                      <div style={{ textAlign: 'center' }}>
-                          <Lock size={48} style={{ marginBottom: '20px', opacity: 0.2 }} />
-                          <p style={{ fontSize: '12px', letterSpacing: '2px' }}>CODE VIRTUALIZED & LOCKED</p>
-                      </div>
-                  </div>
-                ) : (
-                  <MonacoEditor 
-                    height="100%" language="dart" theme="vs-dark" value={codes[activeProgramIdx]}
-                    options={{ 
-                      fontSize: 16, minimap: { enabled: false }, contextmenu: false, automaticLayout: true,
-                      wordBasedSuggestions: false, snippetSuggestions: 'top', 
-                      bracketPairColorization: { enabled: true }, lineNumbers: 'on',
-                      selectionHighlight: true, // Allow selection highlighting
-                      multiCursorModifier: 'alt',
-                      scrollbar: { vertical: 'hidden', horizontal: 'hidden' }
-                    }}
-                    onMount={(editor, monaco) => {
-                        editorRef.current = editor;
-                        monacoRef.current = monaco;
-                        
-                        if (completionProviderRef.current) completionProviderRef.current.dispose();
-                        completionProviderRef.current = monaco.languages.registerCompletionItemProvider('dart', {
-                          triggerCharacters: ['.', '(', ' ', '@'].concat(['S','A','C','T','E','R','p','m','v','i','f','L','M','w','F']),
-                          provideCompletionItems: (model, position) => {
-                            return { suggestions: getDartCompletions(monaco, model, position) };
-                          }
-                        });
-
-                        // Visual Mirror: Detect active widget under cursor
-                        editor.onDidChangeCursorPosition((e) => {
-                           const model = editor.getModel();
-                           const line = model.getLineContent(e.position.lineNumber);
-                           if (line.includes('AppBar')) setActiveSymbol('AppBar');
-                           else if (line.includes('Text')) setActiveSymbol('Text');
-                           else if (line.includes('ElevatedButton') || line.includes('Button')) setActiveSymbol('ElevatedButton');
-                           else setActiveSymbol(null);
-
-                           // AI Proctor Tips based on cursor
-                           if (line.includes('setState')) setProctorTip("💡 Keep your setState simple for better performance.");
-                           else if (line.includes('Column')) setProctorTip("💡 Use MainAxisAlignment to align children vertically.");
-                           else if (line.includes('Container')) setProctorTip("💡 Try Adding padding or decoration to your Container.");
-                        });
-                        
-                        setTimeout(() => validateCodeContent(codes[activeProgramIdx]), 500);
-
-                        editor.onDidFocusEditorWidget(() => { try { navigator.clipboard.writeText(""); } catch (e) {} });
-                        editor.addAction({ id: 'block-paste', label: 'Block Paste', keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyV], run: () => null });
-                        editor.addAction({ id: 'block-copy', label: 'Block Copy', keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyC], run: () => null });
-                    }}
-                    onChange={(v) => { 
-                        const n = [...codes]; n[activeProgramIdx] = v; setCodes(n); 
-                        if (lintTimeoutRef.current) clearTimeout(lintTimeoutRef.current);
-                        lintTimeoutRef.current = setTimeout(() => validateCodeContent(v), 200);
-                    }}
-                  />
-                )}
-             </div>
-
-             {/* ═══ CONSOLE FOOTER ═══ */}
-             <div style={{ height: '180px', background: '#020617', borderTop: '1px solid #1e293b', display: 'flex' }}>
-                <div style={{ flex: 1, padding: '20px', display: 'flex', flexDirection: 'column' }}>
-                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                      <div style={{ fontSize: '11px', color: '#10b981', fontWeight: 'bold', letterSpacing: '1.5px' }}>SIMULATION CONSOLE</div>
-                      <div style={{ display: 'flex', gap: '10px' }}>
-                         <button onClick={handleFormatCode} style={{ background: '#1e293b', color: '#94a3b8', border: '1px solid #334155', borderRadius: '8px', padding: '6px 15px', fontSize: '11px', cursor: 'pointer' }}>FORMAT</button>
-                         <button onClick={handleRunCode} style={{ background: '#10b981', color: '#000', border: 'none', borderRadius: '8px', padding: '6px 20px', fontSize: '11px', fontWeight: '800', cursor: 'pointer' }}>RUN BUILD</button>
-                      </div>
-                   </div>
-                   <div style={{ flex: 1, background: '#0f172a', padding: '15px', borderRadius: '15px', border: '1px solid #1e293b', overflowY: 'auto' }}>
-                      <pre style={{ margin: 0, fontSize: '13px', color: '#94a3b8', whiteSpace: 'pre-wrap', fontFamily: 'monospace' }}>
-                          {compilationResults[activeProgramIdx]?.output || '> Waiting for build command...'}
-                      </pre>
-                   </div>
-                </div>
-             </div>
-          </section>
-        </div>
+          </div>
+        </aside>
       </main>
 
-      {/* Inline keyframe animations + selection blocking CSS */}
+      {showSubmitConfirm && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 11000,
+            background: "rgba(0,0,0,0.8)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <div
+            style={{
+              background: "#0f172a",
+              padding: "40px",
+              borderRadius: "24px",
+              textAlign: "center",
+              maxWidth: "400px",
+              border: "1px solid #1e293b",
+            }}
+          >
+            <AlertCircle
+              size={48}
+              color="#3b82f6"
+              style={{ margin: "0 auto 20px" }}
+            />
+            <h3 style={{ margin: "0 0 10px", fontWeight: "900" }}>
+              SUBMIT EXAM?
+            </h3>
+            <p style={{ color: "#94a3b8", fontSize: "14px" }}>
+              Ensure all code is finalized before confirming.
+            </p>
+            <div style={{ display: "flex", gap: "12px", marginTop: "30px" }}>
+              <button
+                onClick={() => setShowSubmitConfirm(false)}
+                style={{
+                  flex: 1,
+                  padding: "12px",
+                  borderRadius: "10px",
+                  background: "#1e293b",
+                  color: "#fff",
+                  border: "none",
+                }}
+              >
+                CANCEL
+              </button>
+              <button
+                onClick={confirmSubmit}
+                style={{
+                  flex: 1,
+                  padding: "12px",
+                  borderRadius: "10px",
+                  background: "#10b981",
+                  color: "#000",
+                  border: "none",
+                  fontWeight: "900",
+                }}
+              >
+                CONFIRM
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <style jsx global>{`
-        @keyframes fadeIn {
-          from { opacity: 0; }
-          to { opacity: 1; }
-        }
-        @keyframes slideDown {
-          from { opacity: 0; transform: translateX(-50%) translateY(-20px); }
-          to { opacity: 1; transform: translateX(-50%) translateY(0); }
-        }
-        @keyframes pulse {
-          0%, 100% { transform: scale(1); opacity: 1; }
-          50% { transform: scale(1.05); opacity: 0.8; }
-        }
-        /* Block copying but allow selection */
         * {
-          -webkit-user-select: none;
-          user-select: none;
+          box-sizing: border-box;
         }
-        /* Specifically allow selection in editor and console */
-        .monaco-editor, .monaco-editor *, pre, code, input, textarea {
-          -webkit-user-select: text !important;
-          user-select: text !important;
+        ::-webkit-scrollbar {
+          width: 4px;
         }
-        /* Hide Monaco selection highlight (blue highlight) - actually we want to see it now */
-        /*.monaco-editor .selected-text { background: transparent !important; }*/
+        ::-webkit-scrollbar-thumb {
+          background: #1e293b;
+          border-radius: 10px;
+        }
       `}</style>
     </div>
   );
