@@ -43,6 +43,7 @@ next-env.d.ts
 *firebase-adminsdk*.json
 Service-account*.json
 firebase-*.json
+newserviceaccount*.json
 
 # Electron Builder Output
 /dist/
@@ -53,3 +54,5 @@ firebase-*.json
 # Temporary
 /scratch/
 
+# VibeCheck Files (Local AI Tool State - contains API keys)
+.vibecheck/
