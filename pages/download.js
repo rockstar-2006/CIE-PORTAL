@@ -193,7 +193,7 @@ export default function DownloadPage() {
           <div
             style={{ color: "#020617", fontWeight: "900", fontSize: "24px" }}
           >
-            CIE_Secure_Launcher v0.1.0
+            CIE_Secure_Launcher v1.0.8
           </div>
           <a
             href="/api/download"
@@ -216,12 +216,17 @@ export default function DownloadPage() {
           </a>
           <div
             style={{
-              color: "rgba(0,0,0,0.4)",
-              fontSize: "12px",
+              color: "rgba(0,0,0,0.5)",
+              fontSize: "10px",
               fontWeight: "bold",
+              textAlign: "center",
+              maxWidth: "350px",
+              wordBreak: "break-all"
             }}
           >
-            VERSION 0.1.0 • WINDOWS 10/11 COMPATIBLE • ~500 MB
+            SHA256: 40b863bad04fd94eebc5382f5f7412b7bbd4d70020330c8e21692b034bf21d14
+            <br />
+            VERSION 1.0.8 • WINDOWS 10/11 • ~80 MB
           </div>
         </div>
       </main>
