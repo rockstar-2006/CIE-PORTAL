@@ -12,6 +12,7 @@ export default function StudentDashboard({ deferredPrompt, handleInstallClick })
   const [activeCies, setActiveCies] = useState([]);
   const [submissions, setSubmissions] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [viewingResult, setViewingResult] = useState(null);
   const [activeTab, setActiveTab] = useState('new'); // 'new', 'pending', 'completed'
   const [selectedCie, setSelectedCie] = useState(null); // For rules modal
   const [showExitConfirm, setShowExitConfirm] = useState(false); // For native exit
@@ -258,13 +259,65 @@ export default function StudentDashboard({ deferredPrompt, handleInstallClick })
                           ) : <span style={{ color: '#f59e0b' }}>Evaluating...</span>}
                         </td>
                         <td>
-                          <button onClick={() => downloadResult({ ...s, cieTitle: cieInfo.title })} style={{ border: 'none', background: 'none', color: '#10b981', cursor: 'pointer' }}><Download size={18}/></button>
+                          <div style={{ display: 'flex', gap: '10px' }}>
+                            <button onClick={() => setViewingResult(s)} className="btn" style={{ border: 'none', background: '#f1f5f9', color: '#0f172a' }} title="View Details"><Eye size={18}/></button>
+                            <button onClick={() => downloadResult({ ...s, cieTitle: cieInfo.title })} style={{ border: 'none', background: 'none', color: '#10b981', cursor: 'pointer' }} title="Download PDF"><Download size={18}/></button>
+                          </div>
                         </td>
                       </tr>
                     )})}
                   </tbody>
                 </table>
               )}
+            </div>
+          )}
+
+          {/* Result Viewer Modal */}
+          {viewingResult && (
+            <div style={{ position: 'fixed', inset: 0, zIndex: 100, background: 'rgba(15, 23, 42, 0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(8px)' }}>
+               <div className="premium-card" style={{ maxWidth: '700px', width: '100%', padding: '40px', maxHeight: '80vh', overflowY: 'auto' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '30px' }}>
+                    <h2>Evaluation Report</h2>
+                    <button onClick={() => setViewingResult(null)} className="btn">CLOSE</button>
+                  </div>
+                  
+                  {viewingResult.totalScore !== undefined ? (
+                    <div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '15px', marginBottom: '30px' }}>
+                        <div style={{ padding: '15px', background: '#f8fafc', borderRadius: '12px', textAlign: 'center' }}>
+                          <div style={{ fontSize: '10px', fontWeight: 'bold', color: '#64748b' }}>TOTAL SCORE</div>
+                          <div style={{ fontSize: '32px', fontWeight: '900', color: '#10b981' }}>{viewingResult.totalScore.toFixed(1)}/10</div>
+                        </div>
+                        <div style={{ padding: '15px', background: '#f0fdf4', borderRadius: '12px' }}>
+                          <div style={{ fontSize: '10px', fontWeight: 'bold', color: '#059669' }}>AI FEEDBACK</div>
+                          <div style={{ fontSize: '14px', color: '#065f46', marginTop: '5px' }}>{viewingResult.aiScore?.feedback || "Evaluation completed successfully."}</div>
+                        </div>
+                      </div>
+                      
+                      <h4 style={{ marginBottom: '15px' }}>Breakdown</h4>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', marginBottom: '30px' }}>
+                        {['compilation', 'logic', 'ui', 'quality'].map(key => (
+                          <div key={key} style={{ textAlign: 'center', padding: '10px', border: '1px solid #e2e8f0', borderRadius: '10px' }}>
+                            <div style={{ fontSize: '9px', fontWeight: 'bold', color: '#94a3b8' }}>{key.toUpperCase()}</div>
+                            <div style={{ fontWeight: 'bold' }}>{viewingResult.aiScore?.[key] || 0}</div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <h4 style={{ marginBottom: '15px' }}>Your Submission</h4>
+                      <pre style={{ background: '#0f172a', color: '#38bdf8', padding: '20px', borderRadius: '12px', fontSize: '12px', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
+                        {viewingResult.codes?.[0] || "// No code available"}
+                      </pre>
+                    </div>
+                  ) : (
+                    <div style={{ textAlign: 'center', padding: '40px' }}>
+                      <RefreshCcw size={48} className="pulse" style={{ color: '#f59e0b', margin: '0 auto 20px' }} />
+                      <h3>Evaluation in Progress</h3>
+                      <p style={{ color: '#94a3b8' }}>The AI proctor is currently reviewing your code. This usually takes 10-15 seconds.</p>
+                      <button onClick={() => { setLoading(true); fetchStudentData(auth.currentUser); setViewingResult(null); }} className="btn btn-primary" style={{ marginTop: '20px' }}>CHECK AGAIN</button>
+                    </div>
+                  )}
+               </div>
             </div>
           )}
           {activeTab === 'restricted' && (
