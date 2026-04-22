@@ -373,8 +373,42 @@ export default function AdminDashboard() {
 
                 {newCie.targetYear === 'Specific' && (
                   <div style={{ marginBottom: '20px' }}>
-                    <label style={{ display: 'block', marginBottom: '8px', fontSize: '12px', fontWeight: 'bold', color: '#10b981' }}>TARGET USNS (Comma separated)</label>
-                    <input type="text" style={{ width: '100%', borderColor: '#10b981' }} value={newCie.targetUsns || ''} onChange={e => setNewCie({...newCie, targetUsns: e.target.value})} placeholder="e.g. 1RN21CS001, 1RN21CS045" required />
+                    <label style={{ display: 'block', marginBottom: '8px', fontSize: '12px', fontWeight: 'bold', color: '#10b981' }}>SELECT STUDENTS</label>
+                    <div style={{ maxHeight: '150px', overflowY: 'auto', border: '1px solid #10b981', borderRadius: '12px', padding: '10px', background: '#f0fdf4' }}>
+                      <input 
+                        type="text" 
+                        placeholder="🔍 Search name or USN..." 
+                        style={{ width: '100%', marginBottom: '10px', padding: '8px', borderRadius: '8px', border: '1px solid #dcfce7' }}
+                        onChange={(e) => {
+                          const term = e.target.value.toLowerCase();
+                          const items = document.querySelectorAll('.student-option');
+                          items.forEach(it => {
+                            const text = it.innerText.toLowerCase();
+                            it.style.display = text.includes(term) ? 'flex' : 'none';
+                          });
+                        }}
+                      />
+                      {students.sort((a,b) => a.name.localeCompare(b.name)).map(s => (
+                        <label key={s.id} className="student-option" style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}>
+                          <input 
+                            type="checkbox" 
+                            checked={(newCie.targetUsns || '').split(',').includes(s.usn)}
+                            onChange={(e) => {
+                              const current = (newCie.targetUsns || '').split(',').filter(Boolean);
+                              const next = e.target.checked 
+                                ? [...current, s.usn] 
+                                : current.filter(u => u !== s.usn);
+                              setNewCie({...newCie, targetUsns: next.join(',')});
+                            }}
+                          />
+                          <span style={{ fontWeight: 'bold' }}>{s.name}</span>
+                          <span style={{ color: '#64748b', fontSize: '11px' }}>({s.usn})</span>
+                        </label>
+                      ))}
+                    </div>
+                    <div style={{ fontSize: '10px', marginTop: '5px', color: '#059669' }}>
+                      Selected: {(newCie.targetUsns || '').split(',').filter(Boolean).length} students
+                    </div>
                   </div>
                 )}
 
