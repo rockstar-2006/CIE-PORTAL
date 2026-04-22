@@ -86,7 +86,7 @@ function createWindow() {
     },
   );
 
-  const url = isDev ? "http://localhost:3000" : "https://cieportal.vercel.app";
+  const url = isDev ? "http://localhost:3000" : "https://fluttercie.vercel.app";
   
   mainWindow.loadURL(url).catch(err => {
     console.error("Failed to load URL:", err);
@@ -270,7 +270,7 @@ function createWindow() {
   mainWindow.webContents.on("will-navigate", (e, navUrl) => {
     const allowed = isDev
       ? "http://localhost:3000"
-      : "https://cieportal.vercel.app";
+      : "https://fluttercie.vercel.app";
     if (!navUrl.startsWith(allowed)) {
       e.preventDefault();
     }
