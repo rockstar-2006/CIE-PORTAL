@@ -513,6 +513,21 @@ export default function CIESession() {
         },
         { merge: true },
       );
+
+      // 🚨 AUTOMATED AI EVALUATION TRIGGER
+      // We trigger this in the background so the student doesn't have to wait to exit
+      try {
+        const firstProgram = programs[0] || {};
+        axios.post("/api/submissions/score", {
+          submissionId: subId,
+          studentCode: codes[0] || "",
+          programTitle: firstProgram.title || "Flutter Lab",
+          programDescription: firstProgram.description || "",
+        });
+      } catch (scoreErr) {
+        console.error("Auto-score trigger failed:", scoreErr);
+      }
+
       router.push("/student/dashboard");
     } catch (e) {
       setSubmitting(false);

@@ -315,17 +315,52 @@ export default function AdminDashboard() {
                       <thead><tr style={{ color: '#64748b', fontSize: '13px' }}><th>STUDENT</th><th>SCORE</th><th>STATUS</th><th>INTEGRITY REASON</th><th>ACTION</th></tr></thead>
                       <tbody>
                         {submissions.filter(sub => sub.cieId === selectedCieId).map(sub => {
-                          const s = students.find(u => u.id === sub.studentId) || { name: 'Unknown Student', usn: 'N/A' };
+                          const s = students.find(u => u.id === sub.studentId) || { 
+                            name: sub.studentEmail || 'Unknown Student', 
+                            usn: sub.studentId || 'N/A' 
+                          };
                           const isBlocked = sub.status === 'locked';
+                          const isEvaluating = sub.status === 'completed' && !sub.totalScore;
+
                           return (
                             <tr key={sub.id} style={{ borderBottom: '1px solid #f1f5f9' }}>
                               <td style={{ padding: '20px 0' }}><strong>{s.name}</strong><br/><small>{s.usn}</small></td>
-                              <td style={{ color: isBlocked ? '#ef4444' : '#10b981', fontWeight: '900', fontSize: '18px' }}>{sub.totalScore?.toFixed(1) || '0.0'}/10</td>
-                              <td><span style={{ padding: '4px 12px', borderRadius: '10px', fontSize: '11px', fontWeight: 'bold', background: isBlocked ? '#fef2f2' : '#f0fdf4', color: isBlocked ? '#ef4444' : '#10b981' }}>{sub.status.toUpperCase()}</span></td>
+                              <td style={{ color: isBlocked ? '#ef4444' : '#10b981', fontWeight: '900', fontSize: '18px' }}>
+                                {sub.totalScore !== undefined ? `${sub.totalScore.toFixed(1)}/10` : '—'}
+                              </td>
+                              <td><span style={{ padding: '4px 12px', borderRadius: '10px', fontSize: '11px', fontWeight: 'bold', background: isBlocked ? '#fef2f2' : (isEvaluating ? '#fef3c7' : '#f0fdf4'), color: isBlocked ? '#ef4444' : (isEvaluating ? '#92400e' : '#10b981') }}>{isEvaluating ? 'EVALUATING' : sub.status.toUpperCase()}</span></td>
                               <td style={{ maxWidth: '200px', fontSize: '12px', color: '#ef4444' }}>{sub.lockReason || '—'}</td>
                               <td>
                                 <div style={{ display: 'flex', gap: '10px' }}>
-                                    <button onClick={() => setViewingSubmission(sub)} className="btn" title="View Code"><Code size={18}/></button>
+                                    <button onClick={() => setViewingSubmission(sub)} className="btn" title="View Code"><Eye size={18}/></button>
+                                    
+                                    {isEvaluating && (
+                                      <button 
+                                        onClick={async () => {
+                                          const btn = document.activeElement;
+                                          btn.innerText = "⏳...";
+                                          try {
+                                            await fetch('/api/submissions/score', {
+                                              method: 'POST',
+                                              headers: { 'Content-Type': 'application/json' },
+                                              body: JSON.stringify({ 
+                                                submissionId: sub.id,
+                                                studentCode: sub.codes?.[0] || "",
+                                                programTitle: "Manual Evaluation",
+                                                programDescription: "Admin triggered manual check"
+                                              })
+                                            });
+                                            fetchData();
+                                          } catch (e) { alert("Evaluation failed"); }
+                                        }} 
+                                        className="btn" 
+                                        style={{ background: '#f59e0b', color: 'white' }}
+                                        title="Trigger AI Evaluation"
+                                      >
+                                        <RefreshCcw size={18}/>
+                                      </button>
+                                    )}
+
                                     <button onClick={async () => {
                                         if (confirm(`🚨 RESET session for ${s.name}? This will delete their current code and let them restart.`)) {
                                             await deleteDoc(doc(db, 'submissions', sub.id));
