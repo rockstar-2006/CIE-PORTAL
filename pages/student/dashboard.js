@@ -59,12 +59,19 @@ export default function StudentDashboard({ deferredPrompt, handleInstallClick })
 
       const allRelevantCies = [...activeList, ...missingCieData];
       
-      // 5. Filter Active CIEs by Year for the "NEW" section
-      const filteredCies = activeList.filter(cie => 
-        cie.targetYear === 'All' || 
-        String(cie.targetYear) === String(studentYear) ||
-        (studentYear.includes(cie.targetYear))
-      );
+      // 5. Filter Active CIEs for the "NEW" section
+      const filteredCies = activeList.filter(cie => {
+        // Mode 1: Global
+        if (cie.targetYear === 'All') return true;
+        
+        // Mode 2: Specific Year
+        if (String(cie.targetYear) === String(studentYear) || studentYear.includes(String(cie.targetYear))) return true;
+        
+        // Mode 3: Specific Student (USN)
+        if (cie.targetYear === 'Specific' && cie.targetUsns?.includes(profile.usn)) return true;
+
+        return false;
+      });
 
       const categorized = filteredCies.map(cie => {
         const sub = allSubmissions.find(s => s.cieId === cie.id);

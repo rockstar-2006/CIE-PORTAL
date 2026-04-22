@@ -130,11 +130,16 @@ export default function AdminDashboard() {
     try {
       const progIds = newCie.programs.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
       const id = `cie-${Date.now()}`;
+      const targetUsns = newCie.targetYear === 'Specific' 
+        ? newCie.targetUsns.split(',').map(u => u.trim().toUpperCase()).filter(Boolean)
+        : [];
+
       await setDoc(doc(db, 'cies', id), {
         title: newCie.title,
         durationMinutes: parseInt(newCie.duration),
         assignedProgramNos: progIds,
         targetYear: newCie.targetYear,
+        targetUsns: targetUsns,
         status: 'active',
         createdAt: Timestamp.now()
       });
@@ -355,15 +360,24 @@ export default function AdminDashboard() {
                       <input type="number" style={{ width: '100%' }} value={newCie.duration} onChange={e => setNewCie({...newCie, duration: e.target.value})} required />
                    </div>
                    <div>
-                      <label style={{ display: 'block', marginBottom: '8px', fontSize: '12px', fontWeight: 'bold' }}>TARGET YEAR</label>
+                      <label style={{ display: 'block', marginBottom: '8px', fontSize: '12px', fontWeight: 'bold' }}>TARGET AUDIENCE</label>
                       <select style={{ width: '100%', padding: '12px', borderRadius: '12px', border: '1px solid #e2e8f0' }} value={newCie.targetYear} onChange={e => setNewCie({...newCie, targetYear: e.target.value})}>
                           <option value="All">All Students</option>
-                          <option value="2">2nd Year</option>
-                          <option value="3">3rd Year</option>
-                          <option value="4">4th Year</option>
+                          <option value="2">2nd Year Only</option>
+                          <option value="3">3rd Year Only</option>
+                          <option value="4">4th Year Only</option>
+                          <option value="Specific">Specific USNs</option>
                       </select>
                    </div>
                 </div>
+
+                {newCie.targetYear === 'Specific' && (
+                  <div style={{ marginBottom: '20px' }}>
+                    <label style={{ display: 'block', marginBottom: '8px', fontSize: '12px', fontWeight: 'bold', color: '#10b981' }}>TARGET USNS (Comma separated)</label>
+                    <input type="text" style={{ width: '100%', borderColor: '#10b981' }} value={newCie.targetUsns || ''} onChange={e => setNewCie({...newCie, targetUsns: e.target.value})} placeholder="e.g. 1RN21CS001, 1RN21CS045" required />
+                  </div>
+                )}
+
                 <div style={{ marginBottom: '30px' }}>
                    <label style={{ display: 'block', marginBottom: '8px', fontSize: '12px', fontWeight: 'bold' }}>PROGRAM NOS (Comma separated)</label>
                    <input type="text" style={{ width: '100%' }} value={newCie.programs} onChange={e => setNewCie({...newCie, programs: e.target.value})} placeholder="e.g. 1, 4, 7" required />
