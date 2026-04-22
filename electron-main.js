@@ -87,7 +87,17 @@ function createWindow() {
   );
 
   const url = isDev ? "http://localhost:3000" : "https://cieportal.vercel.app";
-  mainWindow.loadURL(url);
+  
+  mainWindow.loadURL(url).catch(err => {
+    console.error("Failed to load URL:", err);
+    // If it fails to load localhost in dev, it's likely the dev server isn't running
+    if (isDev) {
+      mainWindow.loadFile(path.join(__dirname, "public", "error.html")).catch(() => {
+        // Fallback if error.html doesn't exist
+        mainWindow.loadURL(`data:text/html,<html><body style="background:#020617;color:white;display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;"><div><h1>Connection Failed</h1><p>Ensure your dev server is running at <b>http://localhost:3000</b></p><p>Error: ${err.message}</p></div></body></html>`);
+      });
+    }
+  });
 
   // Force true fullscreen over taskbar instantly right before showing
   mainWindow.once("ready-to-show", () => {
@@ -121,11 +131,11 @@ function createWindow() {
     notifyScreenshotBlocked();
     return false;
   });
-  globalShortcut.register("Super+Shift+S", () => {
+  globalShortcut.register("Meta+Shift+S", () => {
     notifyScreenshotBlocked();
     return false;
   });
-  globalShortcut.register("Super+PrintScreen", () => {
+  globalShortcut.register("Meta+PrintScreen", () => {
     notifyScreenshotBlocked();
     return false;
   });
@@ -159,27 +169,27 @@ function createWindow() {
   });
 
   // Block Win key shortcuts (Start menu, Task View, Split Screen, etc.)
-  globalShortcut.register("Super+Tab", () => false); // Task View
-  globalShortcut.register("Super+D", () => false); // Show Desktop
-  globalShortcut.register("Super+E", () => false); // File Explorer
-  globalShortcut.register("Super+R", () => false); // Run dialog
-  globalShortcut.register("Super+L", () => false); // Lock screen
-  globalShortcut.register("Super+M", () => false); // Minimize all
-  globalShortcut.register("Super+Shift+M", () => false); // Restore minimized
-  globalShortcut.register("Super+Up", () => false); // Maximize
-  globalShortcut.register("Super+Down", () => false); // Minimize/Restore
-  globalShortcut.register("Super+Left", () => false); // Snap left (split screen)
-  globalShortcut.register("Super+Right", () => false); // Snap right (split screen)
+  globalShortcut.register("Meta+Tab", () => false); // Task View
+  globalShortcut.register("Meta+D", () => false); // Show Desktop
+  globalShortcut.register("Meta+E", () => false); // File Explorer
+  globalShortcut.register("Meta+R", () => false); // Run dialog
+  globalShortcut.register("Meta+L", () => false); // Lock screen
+  globalShortcut.register("Meta+M", () => false); // Minimize all
+  globalShortcut.register("Meta+Shift+M", () => false); // Restore minimized
+  globalShortcut.register("Meta+Up", () => false); // Maximize
+  globalShortcut.register("Meta+Down", () => false); // Minimize/Restore
+  globalShortcut.register("Meta+Left", () => false); // Snap left (split screen)
+  globalShortcut.register("Meta+Right", () => false); // Snap right (split screen)
 
   // Block Game Bar / Recording
-  globalShortcut.register("Super+G", () => false); // Game Bar
-  globalShortcut.register("Super+Alt+R", () => false); // Game Bar recording
+  globalShortcut.register("Meta+G", () => false); // Game Bar
+  globalShortcut.register("Meta+Alt+R", () => false); // Game Bar recording
 
   // Block Virtual Desktops
-  globalShortcut.register("Super+Control+D", () => false); // New virtual desktop
-  globalShortcut.register("Super+Control+F4", () => false); // Close virtual desktop
-  globalShortcut.register("Super+Control+Left", () => false); // Switch desktop left
-  globalShortcut.register("Super+Control+Right", () => false); // Switch desktop right
+  globalShortcut.register("Meta+Control+D", () => false); // New virtual desktop
+  globalShortcut.register("Meta+Control+F4", () => false); // Close virtual desktop
+  globalShortcut.register("Meta+Control+Left", () => false); // Switch desktop left
+  globalShortcut.register("Meta+Control+Right", () => false); // Switch desktop right
 
   // Block Task Manager shortcut
   globalShortcut.register("Control+Shift+Escape", () => false);
@@ -190,7 +200,7 @@ function createWindow() {
   globalShortcut.register("CommandOrControl+X", () => false);
 
   // Block Windows+V (Clipboard History) - Windows 10+ feature
-  globalShortcut.register("Super+V", () => false);
+  globalShortcut.register("Meta+V", () => false);
 
   // Block Ctrl+Shift+V (Paste Special)
   globalShortcut.register("CommandOrControl+Shift+V", () => false);
@@ -201,8 +211,10 @@ function createWindow() {
   // Block Ctrl+Escape (Start menu)
   globalShortcut.register("Control+Escape", () => false);
 
-  // Block the Windows Key alone
-  globalShortcut.register("Super", () => false);
+    // Block the Windows Key alone
+    // Removed "Super" shortcut as it causes "conversion failure" crash on some Windows environments
+    // globalShortcut.register("Super", () => false);
+
 
   // ═══════════════════════════════════════════════
   //  FOCUS RECOVERY — If app loses focus, GRAB IT BACK
