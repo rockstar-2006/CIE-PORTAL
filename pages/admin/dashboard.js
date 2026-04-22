@@ -73,20 +73,34 @@ export default function AdminDashboard() {
         const ws = wb.Sheets[wsname];
         const data = XLSX.utils.sheet_to_json(ws);
         
-        const response = await fetch('/api/admin/setup-students', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ students: data, force: true }) // Force fresh accounts
-        });
-        
-        const result = await response.json();
+        // 🚨 CHUNKED UPLOAD STRATEGY (Prevents Vercel Timeouts)
+        const CHUNK_SIZE = 10;
+        let totalSuccess = 0;
+        let totalFailed = 0;
+        let allErrors = [];
 
-        if (response.ok) {
-          alert(`Synchronization Complete!\n\n✅ Success: ${result.success}\n❌ Failed: ${result.failed}\n${result.errors.length > 0 ? '\nErrors:\n' + result.errors.slice(0, 5).join('\n') : ''}`);
-        } else {
-          alert("Server Error: " + (result.error || "Failed to process students"));
+        for (let i = 0; i < data.length; i += CHUNK_SIZE) {
+          const chunk = data.slice(i, i + CHUNK_SIZE);
+          const response = await fetch('/api/admin/setup-students', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ students: chunk, force: true })
+          });
+          
+          if (!response.ok) {
+            const errBody = await response.json().catch(() => ({}));
+            allErrors.push(`Batch ${Math.floor(i/CHUNK_SIZE) + 1}: ${errBody.error || 'Server Error'}`);
+            totalFailed += chunk.length;
+            continue;
+          }
+
+          const result = await response.json();
+          totalSuccess += result.success;
+          totalFailed += result.failed;
+          allErrors.push(...result.errors);
         }
-        
+
+        alert(`Synchronization Complete!\n\n✅ Success: ${totalSuccess}\n❌ Failed: ${totalFailed}\n${allErrors.length > 0 ? '\nRecent Errors:\n' + allErrors.slice(0, 5).join('\n') : ''}`);
         fetchData();
       } catch (err) { 
         console.error(err);
