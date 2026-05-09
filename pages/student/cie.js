@@ -57,7 +57,6 @@ export default function CIESession() {
   const [previewCode, setPreviewCode] = useState("");
   const [autoRun, setAutoRun] = useState(false); // DEFAULT TO OFF PER USER REQUEST
   const [isSyncing, setIsSyncing] = useState(false);
-  const [language, setLanguage] = useState("flutter");
 
   const violationTimerRef = useRef(null);
   const strikesRef = useRef(0);
@@ -355,8 +354,6 @@ export default function CIESession() {
       }
 
       setPrograms(selectedProgs);
-      setLanguage(cieData.language || "flutter");
-
       const sessionCodes = selectedProgs.map(
         (p, i) => existingCodes?.[i] || p.boilerplate || "",
       );
@@ -493,56 +490,6 @@ export default function CIESession() {
       return n;
     });
 
-    const isElectron = typeof window !== 'undefined' && window.electronAPI;
-
-    // ═══════════════════════════════════════════════
-    //  FREE LOCAL EXECUTION (C, C++, JAVA)
-    // ═══════════════════════════════════════════════
-    if (language !== "flutter") {
-      if (!isElectron) {
-        setCompilationResults((prev) => {
-          const n = [...prev];
-          n[activeProgramIdx] = {
-            output: "❌ LOCAL EXECUTION BLOCKED\nPlease use the CIE Secure Launcher app to run C/C++/Java code for free.",
-            status: "error",
-          };
-          return n;
-        });
-        return;
-      }
-
-      try {
-        const { output } = await window.electronAPI.runLocalCode({
-          source: currentCode,
-          language: language,
-        });
-
-        setCompilationResults((prev) => {
-          const n = [...prev];
-          n[activeProgramIdx] = {
-            output: output,
-            status: "success",
-            isWarning: output.includes("BUILD ERROR"),
-          };
-          return n;
-        });
-        return;
-      } catch (err) {
-        setCompilationResults((prev) => {
-          const n = [...prev];
-          n[activeProgramIdx] = {
-            output: `SYSTEM ERROR: ${err.message}`,
-            status: "error",
-          };
-          return n;
-        });
-        return;
-      }
-    }
-
-    // ═══════════════════════════════════════════════
-    //  FLUTTER ANALYSIS & SYNC (STANDARD)
-    // ═══════════════════════════════════════════════
     try {
       const res = await axios.post("/api/compile", {
         source: currentCode,
@@ -809,20 +756,6 @@ export default function CIESession() {
           >
             TERMINAL V4.3
           </span>
-          <span
-            style={{
-              fontSize: "9px",
-              background: "#334155",
-              color: "#94a3b8",
-              padding: "2px 8px",
-              borderRadius: "4px",
-              fontWeight: "bold",
-              marginLeft: "10px",
-              textTransform: "uppercase"
-            }}
-          >
-            {language}
-          </span>
         </div>
         <div style={{ display: "flex", gap: "5px" }}>
           {programs.map((p, i) => (
@@ -1014,15 +947,7 @@ export default function CIESession() {
           <div style={{ flex: 1 }}>
             <MonacoEditor
               height="100%"
-              language={
-                language === "flutter"
-                  ? "dart"
-                  : language === "c"
-                    ? "c"
-                    : language === "cpp"
-                      ? "cpp"
-                      : "java"
-              }
+              language="dart"
               theme="vs-dark"
               value={codes[activeProgramIdx]}
               options={{
@@ -1077,124 +1002,122 @@ export default function CIESession() {
           }}
           data-preview-container
         >
-          {language === "flutter" && (
+          <div
+            style={{
+              height: "580px",
+              width: "280px",
+              background: "#020617",
+              borderRadius: "40px",
+              border: "12px solid #1e293b",
+              overflow: "hidden",
+              position: "relative",
+              boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.5)",
+              margin: "0 auto",
+            }}
+            data-preview-container
+          >
+            {/* Phone Notch/Speaker */}
             <div
               style={{
-                height: "580px",
-                width: "280px",
-                background: "#020617",
-                borderRadius: "40px",
-                border: "12px solid #1e293b",
-                overflow: "hidden",
-                position: "relative",
-                boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.5)",
-                margin: "0 auto",
+                position: "absolute",
+                top: 0,
+                left: "50%",
+                transform: "translateX(-50%)",
+                width: "120px",
+                height: "25px",
+                background: "#1e293b",
+                borderBottomLeftRadius: "15px",
+                borderBottomRightRadius: "15px",
+                zIndex: 20,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: "8px",
               }}
-              data-preview-container
             >
-              {/* Phone Notch/Speaker */}
+              <div
+                style={{
+                  width: "40px",
+                  height: "4px",
+                  background: "#0f172a",
+                  borderRadius: "2px",
+                }}
+              ></div>
+              <div
+                style={{
+                  width: "6px",
+                  height: "6px",
+                  background: "#0f172a",
+                  borderRadius: "50%",
+                }}
+              ></div>
+            </div>
+
+            <div style={{ position: "relative", height: "100%" }}>
+              <iframe
+                ref={iframeRef}
+                key={iframeKey}
+                src={`https://dartpad.dev/embed-flutter.html?theme=light&run=true&split=1&code=${encodeURIComponent(
+                  previewCode,
+                )}&t=${iframeKey}`}
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  border: "none",
+                }}
+                sandbox="allow-scripts allow-same-origin"
+                onLoad={() => {
+                  // HARD RESET: Immediately push the initial code to overwrite any cached DartPad session
+                  if (iframeRef.current?.contentWindow) {
+                    const win = iframeRef.current.contentWindow;
+                    // Send multiple times to ensure it's caught as the compiler starts
+                    [500, 1000, 2000].forEach((delay) => {
+                      setTimeout(() => {
+                        win.postMessage(
+                          { type: "sourceCode", sourceCode: previewCode },
+                          "*",
+                        );
+                        win.postMessage({ type: "run" }, "*");
+                      }, delay);
+                    });
+                  }
+
+                  // Attempt to hide code panel via CSS injection (fallback for older embeds)
+                  try {
+                    const iframeDoc = iframeRef.current?.contentDocument;
+                    if (iframeDoc) {
+                      const style = iframeDoc.createElement("style");
+                      style.textContent = `
+                        .code-panel, .editor, [data-code], .dart-code, .header {
+                          display: none !important;
+                        }
+                        .output-panel, .preview, .console {
+                          width: 100% !important;
+                        }
+                      `;
+                      iframeDoc.head.appendChild(style);
+                    }
+                  } catch (e) {
+                    // Cross-origin - CSS injection may not work, split=1 is the primary fix
+                  }
+                }}
+              />
+              {/* Partial Security Overlay: Blocks the top toolbar and internal DartPad tabs (Code/Output) */}
               <div
                 style={{
                   position: "absolute",
                   top: 0,
-                  left: "50%",
-                  transform: "translateX(-50%)",
-                  width: "120px",
-                  height: "25px",
-                  background: "#1e293b",
-                  borderBottomLeftRadius: "15px",
-                  borderBottomRightRadius: "15px",
-                  zIndex: 20,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: "8px",
+                  left: 0,
+                  right: 0,
+                  height: "80px", // Increased to cover internal tabs
+                  zIndex: 10,
+                  background: "transparent",
+                  cursor: "not-allowed",
                 }}
-              >
-                <div
-                  style={{
-                    width: "40px",
-                    height: "4px",
-                    background: "#0f172a",
-                    borderRadius: "2px",
-                  }}
-                ></div>
-                <div
-                  style={{
-                    width: "6px",
-                    height: "6px",
-                    background: "#0f172a",
-                    borderRadius: "50%",
-                  }}
-                ></div>
-              </div>
-
-              <div style={{ position: "relative", height: "100%" }}>
-                <iframe
-                  ref={iframeRef}
-                  key={iframeKey}
-                  src={`https://dartpad.dev/embed-flutter.html?theme=light&run=true&split=1&code=${encodeURIComponent(
-                    previewCode,
-                  )}&t=${iframeKey}`}
-                  style={{
-                    width: "100%",
-                    height: "100%",
-                    border: "none",
-                  }}
-                  sandbox="allow-scripts allow-same-origin"
-                  onLoad={() => {
-                    // HARD RESET: Immediately push the initial code to overwrite any cached DartPad session
-                    if (iframeRef.current?.contentWindow) {
-                      const win = iframeRef.current.contentWindow;
-                      // Send multiple times to ensure it's caught as the compiler starts
-                      [500, 1000, 2000].forEach((delay) => {
-                        setTimeout(() => {
-                          win.postMessage(
-                            { type: "sourceCode", sourceCode: previewCode },
-                            "*",
-                          );
-                          win.postMessage({ type: "run" }, "*");
-                        }, delay);
-                      });
-                    }
-
-                    // Attempt to hide code panel via CSS injection (fallback for older embeds)
-                    try {
-                      const iframeDoc = iframeRef.current?.contentDocument;
-                      if (iframeDoc) {
-                        const style = iframeDoc.createElement("style");
-                        style.textContent = `
-                          .code-panel, .editor, [data-code], .dart-code, .header {
-                            display: none !important;
-                          }
-                          .output-panel, .preview, .console {
-                            width: 100% !important;
-                          }
-                        `;
-                        iframeDoc.head.appendChild(style);
-                      }
-                    } catch (e) {
-                      // Cross-origin - CSS injection may not work, split=1 is the primary fix
-                    }
-                  }}
-                />
-                {/* Partial Security Overlay: Blocks the top toolbar and internal DartPad tabs (Code/Output) */}
-                <div
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    right: 0,
-                    height: "80px", // Increased to cover internal tabs
-                    zIndex: 10,
-                    background: "transparent",
-                    cursor: "not-allowed",
-                  }}
-                  title="Direct interaction with virtual device controls is disabled."
-                />
-              </div>
+                title="Direct interaction with virtual device controls is disabled."
+              />
             </div>
-          )}
+          </div>
           <div
             style={{
               flex: 1,

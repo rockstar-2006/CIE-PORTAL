@@ -12,9 +12,7 @@ const isDev = !app.isPackaged;
 
 let mainWindow;
 let focusRecoveryInterval = null;
-const { exec, execSync } = require("child_process");
-const fs = require("fs");
-const os = require("os");
+const { exec } = require("child_process");
 
 // ═══════════════════════════════════════════════════════════════
 //  WINDOWS TASKBAR SUPPRESSION (NUCLEAR OPTION)
@@ -136,72 +134,6 @@ function createWindow() {
   ipcMain.on("app:quit", () => {
     setTaskbarVisibility(true); // 🚨 RESTORE TASKBAR BEFORE QUIT
     forceQuit();
-  });
-
-  // ═══════════════════════════════════════════════
-  //  FREE LOCAL EXECUTION ENGINE (C, C++, JAVA)
-  // ═══════════════════════════════════════════════
-  ipcMain.handle("code:compile", async (event, { source, language }) => {
-    const scratchDir = path.join(os.tmpdir(), "cie-local-run");
-    if (!fs.existsSync(scratchDir)) fs.mkdirSync(scratchDir, { recursive: true });
-
-    try {
-      let fileName = "";
-      let compileCmd = "";
-      let runCmd = "";
-
-      if (language === "c") {
-        fileName = "solution.c";
-        const exeName = "solution.exe";
-        fs.writeFileSync(path.join(scratchDir, fileName), source);
-        compileCmd = `gcc "${fileName}" -o "${exeName}"`;
-        runCmd = `"${path.join(scratchDir, exeName)}"`;
-      } else if (language === "cpp") {
-        fileName = "solution.cpp";
-        const exeName = "solution.exe";
-        fs.writeFileSync(path.join(scratchDir, fileName), source);
-        compileCmd = `g++ "${fileName}" -o "${exeName}"`;
-        runCmd = `"${path.join(scratchDir, exeName)}"`;
-      } else if (language === "java") {
-        // Find public class name or default to Main
-        const classMatch = source.match(/public\s+class\s+(\w+)/);
-        const className = classMatch ? classMatch[1] : "Main";
-        fileName = `${className}.java`;
-        fs.writeFileSync(path.join(scratchDir, fileName), source);
-        compileCmd = `javac "${fileName}"`;
-        runCmd = `java "${className}"`;
-      } else {
-        return { output: "Error: Unsupported local language." };
-      }
-
-      // 1. Compile
-      try {
-        const { stderr: compileError } = await new Promise((resolve, reject) => {
-          exec(compileCmd, { cwd: scratchDir }, (error, stdout, stderr) => {
-            if (error) reject({ stderr });
-            else resolve({ stderr });
-          });
-        });
-        if (compileError) {
-           // GCC/Javac warnings might be in stderr even if it succeeds
-           // But usually if error is null, it's fine.
-        }
-      } catch (err) {
-        return { output: `BUILD ERROR:\n${err.stderr}` };
-      }
-
-      // 2. Run
-      const { stdout, stderr } = await new Promise((resolve) => {
-        exec(runCmd, { cwd: scratchDir, timeout: 5000 }, (error, stdout, stderr) => {
-          resolve({ stdout, stderr: stderr || (error ? error.message : "") });
-        });
-      });
-
-      return { output: stdout + (stderr ? `\n\nERRORS/STDERR:\n${stderr}` : "") };
-
-    } catch (err) {
-      return { output: `SYSTEM ERROR: ${err.message}` };
-    }
   });
 
   // ═══════════════════════════════════════════════

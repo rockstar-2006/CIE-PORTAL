@@ -41,10 +41,9 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       title: cieData.title,
-      programs: assignedPrograms.length > 0 ? assignedPrograms : (cieData.manualPrograms || []),
+      programs: assignedPrograms,
       durationMinutes: cieData.durationMinutes,
-      startedAt: cieData.startedAt,
-      language: cieData.language || "flutter"
+      startedAt: cieData.startedAt
     });
   } catch (error) {
     console.error("Error fetching CIE details:", error);

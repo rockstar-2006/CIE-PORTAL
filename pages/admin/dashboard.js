@@ -53,11 +53,8 @@ export default function AdminDashboard() {
     duration: 45,
     programs: "1,2",
     targetYear: "All",
-    targetUsns: "",
-    language: "flutter",
-    manualPrograms: [],
+    targetUsns: "", // Added to prevent undefined split errors
   });
-  const [parsingManual, setParsingManual] = useState(false);
   const [importing, setImporting] = useState(false);
   const [editingScores, setEditingScores] = useState(null);
 
@@ -236,32 +233,6 @@ export default function AdminDashboard() {
     reader.readAsBinaryString(file);
   };
 
-  const handleManualUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    setParsingManual(true);
-    const formData = new FormData();
-    formData.append("manual", file);
-
-    try {
-      const res = await fetch("/api/admin/parse-manual", {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!res.ok) throw new Error("Failed to parse manual");
-
-      const { programs } = await res.data || await res.json();
-      setNewCie((prev) => ({ ...prev, manualPrograms: programs }));
-      alert(`✅ Successfully scraped ${programs.length} programs from manual!`);
-    } catch (err) {
-      alert("❌ Error scraping manual: " + err.message);
-    } finally {
-      setParsingManual(false);
-    }
-  };
-
   const downloadTemplate = () => {
     const data = [
       {
@@ -333,8 +304,6 @@ export default function AdminDashboard() {
         assignedProgramNos: progIds,
         targetYear: newCie.targetYear,
         targetUsns: targetUsns,
-        language: newCie.language || "flutter",
-        manualPrograms: newCie.manualPrograms || [],
         status: "active",
         createdAt: Timestamp.now(),
       });
@@ -1179,88 +1148,6 @@ export default function AdminDashboard() {
                     required
                   />
                 </div>
-                <div>
-                  <label
-                    style={{
-                      display: "block",
-                      marginBottom: "8px",
-                      fontSize: "12px",
-                      fontWeight: "bold",
-                    }}
-                  >
-                    LANGUAGE
-                  </label>
-                  <select
-                    style={{ width: "100%", padding: "10px", borderRadius: "12px", border: "1px solid #e2e8f0" }}
-                    value={newCie.language}
-                    onChange={(e) =>
-                      setNewCie({ ...newCie, language: e.target.value })
-                    }
-                  >
-                    <option value="flutter">Flutter (DartPad)</option>
-                    <option value="c">C (GCC)</option>
-                    <option value="cpp">C++ (G++)</option>
-                    <option value="java">Java (JDK)</option>
-                  </select>
-                </div>
-              </div>
-
-              <div style={{ marginBottom: "20px" }}>
-                <label
-                  style={{
-                    display: "block",
-                    marginBottom: "8px",
-                    fontSize: "12px",
-                    fontWeight: "bold",
-                  }}
-                >
-                  SCRAPE LAB MANUAL (PDF)
-                </label>
-                <div style={{ display: "flex", gap: "10px" }}>
-                  <label
-                    className="btn"
-                    style={{
-                      flex: 1,
-                      background: "#f1f5f9",
-                      cursor: "pointer",
-                      textAlign: "center",
-                      border: "1px dashed #cbd5e1",
-                    }}
-                  >
-                    {parsingManual ? "Scraping AI..." : "+ UPLOAD MANUAL PDF"}
-                    <input
-                      type="file"
-                      hidden
-                      accept=".pdf"
-                      onChange={handleManualUpload}
-                      disabled={parsingManual}
-                    />
-                  </label>
-                </div>
-                {newCie.manualPrograms.length > 0 && (
-                  <div
-                    style={{
-                      marginTop: "10px",
-                      maxHeight: "150px",
-                      overflowY: "auto",
-                      background: "#f8fafc",
-                      padding: "10px",
-                      borderRadius: "12px",
-                      border: "1px solid #e2e8f0",
-                    }}
-                  >
-                    <span style={{ fontSize: "10px", fontWeight: "bold", color: "#10b981" }}>
-                      AI SCRAPED PROGRAMS:
-                    </span>
-                    {newCie.manualPrograms.map((p, idx) => (
-                      <div key={idx} style={{ fontSize: "11px", marginTop: "5px", borderBottom: "1px solid #f1f5f9", paddingBottom: "5px" }}>
-                        <strong>{idx + 1}. {p.title}</strong>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
                 <div>
                   <label
                     style={{
