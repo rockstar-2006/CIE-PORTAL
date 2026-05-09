@@ -35,10 +35,18 @@ service cloud.firestore {
 
     // Submissions Collection
     match /submissions/{submissionId} {
-      // Use the submissionId (cieId_uid) to verify the current student
-      allow read, write: if isAuthenticated() && (
+      allow read: if isAuthenticated() && (
         request.auth.uid == submissionId.split('_').pop() || 
         hasRole('admin')
+      );
+      
+      // Prevent students from overwriting scores or AI results
+      allow create: if isAuthenticated() && request.auth.uid == submissionId.split('_').pop();
+      allow update: if isAuthenticated() && (
+        hasRole('admin') || (
+          request.auth.uid == submissionId.split('_').pop() && 
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['totalScore', 'aiScore', 'aiFeedback', 'error'])
+        )
       );
     }
 

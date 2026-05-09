@@ -1,10 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/router';
-import Head from 'next/head';
 import { auth, db } from '@/lib/firebase';
 import { signInWithEmailAndPassword, onAuthStateChanged, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
 import { doc, getDoc, setDoc, Timestamp, collection, query, where, getDocs } from 'firebase/firestore';
-import { LogIn, GraduationCap, ShieldCheck, Download } from 'lucide-react';
+import { LogIn, GraduationCap, ShieldCheck, Download, Power } from 'lucide-react';
 
 export default function Home({ deferredPrompt, handleInstallClick }) {
   const [email, setEmail] = useState('');
@@ -12,11 +11,13 @@ export default function Home({ deferredPrompt, handleInstallClick }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [showDownloadBtn, setShowDownloadBtn] = useState(false);
+  const [isElectron, setIsElectron] = useState(false); // New state for hydration safety
   const router = useRouter();
 
   useEffect(() => {
-    if (typeof window !== 'undefined' && !window.electronAPI) {
-      setShowDownloadBtn(true);
+    if (typeof window !== 'undefined') {
+      if (!window.electronAPI) setShowDownloadBtn(true);
+      else setIsElectron(true);
     }
 
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
@@ -38,6 +39,10 @@ export default function Home({ deferredPrompt, handleInstallClick }) {
       }
     });
     return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    document.title = "CIE Portal | Secure Access";
   }, []);
 
   const handleLogin = async (e) => {
@@ -141,8 +146,6 @@ export default function Home({ deferredPrompt, handleInstallClick }) {
       background: 'radial-gradient(circle at top right, #f0fdf4 0%, #f8fafc 100%)',
       padding: '24px'
     }}>
-      <Head><title>CIE Portal | Secure Access</title></Head>
-
       <div className="premium-card" style={{ maxWidth: '440px', width: '100%', textAlign: 'center' }}>
         <div style={{ display: 'inline-flex', padding: '16px', background: '#ecfdf5', borderRadius: '24px', marginBottom: '24px' }}>
           <GraduationCap size={40} color="#10b981" />
@@ -187,6 +190,17 @@ export default function Home({ deferredPrompt, handleInstallClick }) {
           <button className="btn btn-primary" style={{ width: '100%', height: '54px', borderRadius: '18px', background: '#10b981', color: 'black', justifyContent: 'center' }} disabled={loading}>
             {loading ? 'Authenticating...' : <><LogIn size={20} /> Access Workspace</>}
           </button>
+
+          {isElectron && (
+            <button 
+              type="button"
+              onClick={() => window.electronAPI.quit()}
+              className="btn" 
+              style={{ width: '100%', height: '54px', borderRadius: '18px', background: '#fef2f2', border: '1px solid #fee2e2', color: '#ef4444', fontWeight: 'bold', justifyContent: 'center', marginTop: '15px' }} 
+            >
+              <Power size={20} /> Exit Secure Environment
+            </button>
+          )}
         </form>
 
         <div style={{ margin: '30px 0', display: 'flex', alignItems: 'center', gap: '15px' }}>

@@ -1,6 +1,5 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/router";
-import Head from "next/head";
 import { db, auth } from "@/lib/firebase";
 import {
   collection,
@@ -46,8 +45,11 @@ export default function StudentDashboard({
   const [showExitBtn, setShowExitBtn] = useState(false);
 
   useEffect(() => {
+    document.title = "Student Command | CIE Portal";
+    
     if (typeof window !== "undefined") {
       if (!window.electronAPI) setShowDownloadBtn(true);
+      // isElectron check is handled in useEffect to prevent hydration mismatch
       if (window.electronAPI) setShowExitBtn(true);
     }
     const unsubscribeAuth = auth.onAuthStateChanged((user) => {
@@ -212,10 +214,6 @@ export default function StudentDashboard({
 
   return (
     <div style={{ background: "#f8fafc", minHeight: "100vh" }}>
-      <Head>
-        <title>Student Hub | CIE Portal</title>
-      </Head>
-
       {/* Rules Modal */}
       {selectedCie && (
         <div
@@ -374,7 +372,7 @@ export default function StudentDashboard({
                 }}
                 onClick={() => {
                   if (typeof window !== "undefined" && window.electronAPI) {
-                    window.electronAPI.quitApp();
+                    window.electronAPI.quit();
                   }
                 }}
               >
@@ -921,16 +919,22 @@ export default function StudentDashboard({
             {Array.from({ length: 12 }).map((_, i) => (
               <div
                 key={i}
-                onClick={() =>
+                onClick={() => {
+                  if (newCies.length > 0 || pendingCies.length > 0) {
+                    alert("🚨 Practice Mode is disabled during an active CIE. Please focus on your examination.");
+                    return;
+                  }
                   router.push(`/student/cie?cieId=practice&programNo=${i + 1}`)
-                }
+                }}
                 className="premium-card"
                 style={{
                   padding: "20px",
                   display: "flex",
                   gap: "16px",
                   alignItems: "center",
-                  cursor: "pointer",
+                  cursor: (newCies.length > 0 || pendingCies.length > 0) ? "not-allowed" : "pointer",
+                  opacity: (newCies.length > 0 || pendingCies.length > 0) ? 0.6 : 1,
+                  filter: (newCies.length > 0 || pendingCies.length > 0) ? "grayscale(1)" : "none",
                 }}
               >
                 <div

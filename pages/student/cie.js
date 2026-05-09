@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/router";
-import Head from "next/head";
 import dynamic from "next/dynamic";
 import {
   Play,
@@ -20,7 +19,7 @@ import {
 import { db, auth } from "@/lib/firebase";
 import { doc, getDoc, updateDoc, setDoc, Timestamp } from "firebase/firestore";
 import axios from "axios";
-import { labsData } from "@/lib/labs";
+// Removed labsData import for security (Moving to server-side fetch)
 import { runDartLinter } from "@/lib/dartLinter";
 import { registerDartIntellisense } from "@/lib/dartIntellisense";
 
@@ -70,6 +69,9 @@ export default function CIESession() {
   const monacoRef = useRef(null);
   const autoRunTimeoutRef = useRef(null);
   const iframeRef = useRef(null);
+  const macroDetectionRef = useRef({ lastTime: Date.now(), lastLength: 0 });
+  const isManualTypingRef = useRef(false);
+  const typingIntervalsRef = useRef([]); // Store last 10 key intervals for variance check
 
   useEffect(() => {
     setMounted(true);
@@ -86,13 +88,27 @@ export default function CIESession() {
     if (!cieId) return;
     fetchSessionData();
 
+    // 🚨 ENFORCE ELECTRON-ONLY ACCESS
+    const isElectron = typeof window !== 'undefined' && window.electronAPI;
+    if (!isElectron && process.env.NODE_ENV === 'production') {
+      window.location.href = "/download"; // Redirect browsers to download page
+      return;
+    }
+
     const onBlur = () => {
       // ONLY trigger strikes in the Secure Launcher
       const isElectron = typeof window !== 'undefined' && window.electronAPI;
       if (!isElectron) return;
 
       setTimeout(() => {
-        if (document.activeElement instanceof HTMLIFrameElement) return;
+        const activeEl = document.activeElement;
+        
+        // ALLOW focus on the Virtual Device ONLY if it's the expected DartPad embed
+        if (activeEl instanceof HTMLIFrameElement) {
+          const src = activeEl.getAttribute('src') || "";
+          if (src.includes("dartpad.dev/embed-flutter.html")) return;
+        }
+
         if (
           overlayActiveRef.current ||
           lockedRef.current ||
@@ -286,6 +302,10 @@ export default function CIESession() {
     return () => clearInterval(timerInterval);
   }, []);
 
+  useEffect(() => {
+    document.title = `${programs[activeProgramIdx]?.title || "Exam"} | CIE Secure`;
+  }, [activeProgramIdx, programs]);
+
   const fetchSessionData = async () => {
     try {
       setLoading(true);
@@ -299,26 +319,36 @@ export default function CIESession() {
           setIsViolationOverlay(true);
         }
         existingCodes = data.codes;
+        // PERSIST STRIKES: Restore strike count from database
+        if (data.strikes !== undefined) {
+          strikesRef.current = data.strikes;
+          setStrikes(data.strikes);
+        }
+      } else if (cieId !== "practice") {
+        // FIRST TIME STARTING: Initialize the submission with startedAt
+        try {
+          await setDoc(doc(db, "submissions", subId), {
+            cieId,
+            studentId: auth.currentUser.uid,
+            studentEmail: auth.currentUser.email,
+            startedAt: Timestamp.now(),
+            status: "ongoing",
+            strikes: 0
+          }, { merge: true });
+        } catch (e) {
+          console.error("Failed to initialize session start time:", e);
+        }
       }
 
-      const cieDoc = await getDoc(doc(db, "cies", cieId));
-      if (!cieDoc.exists() && cieId !== "practice") {
-        router.push("/student/dashboard");
-        return;
-      }
-
+      // 🚨 SECURE FETCH: Get CIE details from server (prevents lab manual leak)
+      const detailsRes = await axios.get(`/api/submissions/details?cieId=${cieId}&programNo=${router.query.programNo || 1}`);
+      const cieData = detailsRes.data;
+      
       let duration = 3600;
       let startTime = new Date();
-      let selectedProgs = [labsData[0]];
+      let selectedProgs = cieData.programs || [];
 
-      if (cieId === "practice") {
-        selectedProgs = [labsData[0]];
-      } else {
-        const cieData = cieDoc.data();
-        const progIds = cieData.assignedProgramNos || [];
-        selectedProgs = progIds
-          .map((id) => labsData.find((p) => String(p.programNo) === String(id)))
-          .filter(Boolean);
+      if (cieId !== "practice") {
         duration = cieData.durationMinutes * 60;
         startTime = cieData.startedAt?.toDate() || new Date();
       }
@@ -361,6 +391,18 @@ export default function CIESession() {
     if (strikesRef.current >= MAX_STRIKES) {
       handleFinalLock("Security Policy: Maximum Violations");
     } else {
+      // PERSIST STRIKES: Save strike count to Firestore immediately
+      try {
+        const subId = `${cieId}_${auth.currentUser?.uid}`;
+        updateDoc(doc(db, "submissions", subId), {
+          strikes: strikesRef.current,
+          lastViolationAt: Timestamp.now(),
+          lastViolationReason: reason
+        });
+      } catch (e) {
+        console.error("Failed to persist strike:", e);
+      }
+
       violationTimerRef.current = setInterval(() => {
         setViolationTimeLeft((p) => {
           if (p <= 1) {
@@ -453,16 +495,39 @@ export default function CIESession() {
         source: currentCode,
         mode: "analyze",
       });
+      
+      const { status, output, issues, isWarning } = res.data;
+
       setCompilationResults((prev) => {
         const n = [...prev];
         n[activeProgramIdx] = {
-          output: res.data.output,
-          status: res.data.status,
+          output: output,
+          status: status,
+          isWarning: isWarning,
         };
         return n;
       });
 
-      if (res.data.status === "success") {
+      // 🚨 UPDATE EDITOR MARKERS (Red Squiggles)
+      if (monacoRef.current && editorRef.current) {
+        const model = editorRef.current.getModel();
+        const monaco = monacoRef.current;
+        
+        const markers = (issues || []).map(issue => ({
+          startLineNumber: issue.line,
+          startColumn: issue.column,
+          endLineNumber: issue.line,
+          endColumn: issue.column + 5, // Approximate length
+          message: issue.message,
+          severity: issue.kind === 'error' ? monaco.MarkerSeverity.Error : monaco.MarkerSeverity.Warning,
+          source: 'Dart Build'
+        }));
+
+        // Combine with existing syntax markers if any
+        monaco.editor.setModelMarkers(model, 'dart-build', markers);
+      }
+
+      if (status === "success") {
         syncVirtualDevice(currentCode);
       }
     } catch (e) {
@@ -480,6 +545,48 @@ export default function CIESession() {
   };
 
   const handleCodeChange = (v) => {
+    const now = Date.now();
+    const charDiff = Math.abs(v.length - macroDetectionRef.current.lastLength);
+    
+    // 🚨 1. PROGRAMMATIC INJECTION DETECTION (setValue Bypass)
+    // If content changed but NO keyboard event was recorded, it's a script injection
+    if (!isManualTypingRef.current && charDiff > 1) {
+       handleFocusLossStrike("Code Injection Detected (Programmatic)");
+       return;
+    }
+
+    // 🚨 2. ADVANCED TYPING SPEED / MACRO DETECTION
+    const timeDiff = now - macroDetectionRef.current.lastTime;
+
+    // A. Extreme Speed Check (Block instant massive pastes)
+    if (timeDiff < 100 && charDiff > 20) {
+      handleFocusLossStrike("Inhuman Typing Speed (Macro)");
+      return;
+    }
+
+    // B. Human Variance Analysis (Bot Detection)
+    if (charDiff === 1) { // Normal character typing
+      const intervals = typingIntervalsRef.current;
+      intervals.push(timeDiff);
+      if (intervals.length > 10) intervals.shift();
+
+      if (intervals.length === 10) {
+        // Calculate average and standard deviation
+        const avg = intervals.reduce((a, b) => a + b, 0) / 10;
+        const variance = intervals.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / 10;
+        
+        // Humans have high variance (irregular rhythm). 
+        // Bots/Scripts have near-zero variance (perfect rhythm).
+        if (variance < 2 && avg < 150) { // Extremely consistent AND fast
+          handleFocusLossStrike("Bot-like Rhythm Detected");
+          return;
+        }
+      }
+    }
+
+    macroDetectionRef.current = { lastTime: now, lastLength: v.length };
+    isManualTypingRef.current = false; // Reset for next change
+
     const n = [...codes];
     n[activeProgramIdx] = v;
     setCodes(n);
@@ -492,9 +599,6 @@ export default function CIESession() {
         programs[activeProgramIdx],
       );
     }
-
-    // AUTO-SYNC REMOVED PER USER REQUEST TO PREVENT FOCUS JUMPING
-    // Student must now click "RUN BUILD" to sync the virtual device.
   };
 
   const confirmSubmit = async () => {
@@ -515,14 +619,17 @@ export default function CIESession() {
       );
 
       // 🚨 AUTOMATED AI EVALUATION TRIGGER
-      // We trigger this in the background so the student doesn't have to wait to exit
+      // We trigger this and wait briefly to ensure the request is dispatched
       try {
-        const firstProgram = programs[0] || {};
-        axios.post("/api/submissions/score", {
+        const idToken = await auth.currentUser.getIdToken();
+        await axios.post("/api/submissions/score", {
           submissionId: subId,
-          studentCode: codes[0] || "",
-          programTitle: firstProgram.title || "Flutter Lab",
-          programDescription: firstProgram.description || "",
+          codes: codes,
+          programs: programs,
+          programTitle: programs[activeProgramIdx]?.title || "Exam",
+          programDescription: programs[activeProgramIdx]?.description || "Evaluation",
+        }, {
+          headers: { Authorization: `Bearer ${idToken}` }
         });
       } catch (scoreErr) {
         console.error("Auto-score trigger failed:", scoreErr);
@@ -556,17 +663,14 @@ export default function CIESession() {
     <div
       style={{
         background: "#020617",
-        height: "100vh",
+        minHeight: "100vh",
+        display: "flex",
+        flexDirection: "column",
+        color: "white",
+        fontFamily: "Inter, system-ui, sans-serif",
         overflow: "hidden",
-        color: "#e2e8f0",
-        fontFamily: "Inter, sans-serif",
       }}
     >
-      <Head>
-        <title>
-          CIE PORTAL | {programs[activeProgramIdx]?.title || "SESSION"}
-        </title>
-      </Head>
 
       {isViolationOverlay && (
         <div
@@ -847,6 +951,7 @@ export default function CIESession() {
               theme="vs-dark"
               value={codes[activeProgramIdx]}
               options={{
+                autoIndent: "none",
                 fontSize: 16,
                 minimap: { enabled: false },
                 automaticLayout: true,
@@ -877,6 +982,11 @@ export default function CIESession() {
                   monaco.KeyMod.Shift | monaco.KeyCode.Insert,
                   () => {},
                 );
+
+                // 🚨 TRACK MANUAL TYPING (To detect programmatic injections)
+                editor.onKeyDown((e) => {
+                  isManualTypingRef.current = true;
+                });
               }}
               onChange={handleCodeChange}
             />
@@ -1036,37 +1146,53 @@ export default function CIESession() {
               >
                 DEBUG CONSOLE
               </span>
-              <div style={{ flex: 1 }}></div>
               <button
                 onClick={() => handleRunCode()}
                 style={{
                   background: "#10b981",
                   color: "#000",
-                  padding: "4px 15px",
-                  borderRadius: "6px",
-                  fontSize: "10px",
+                  padding: "6px 25px",
+                  borderRadius: "8px",
+                  fontSize: "11px",
                   fontWeight: "900",
                   border: "none",
                   cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  boxShadow: "0 4px 12px rgba(16, 185, 129, 0.2)",
                 }}
               >
-                RUN BUILD
+                <Play size={14} fill="black" /> RUN BUILD
               </button>
+              <div style={{ width: "15px" }}></div>
+              <Terminal size={14} color="#64748b" />
+              <span
+                style={{ fontSize: "9px", fontWeight: "900", color: "#64748b" }}
+              >
+                DEBUG CONSOLE
+              </span>
+              <div style={{ flex: 1 }}></div>
             </div>
-            <div style={{ flex: 1, padding: "12px", overflowY: "auto" }}>
+            <div style={{ flex: 1, padding: "15px", overflowY: "auto", background: "#010409" }}>
               <pre
                 style={{
                   margin: 0,
-                  fontSize: "12px",
+                  fontSize: "11px",
+                  lineHeight: "1.6",
+                  fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
                   color:
-                    compilationResults[activeProgramIdx]?.status === "error"
-                      ? "#f87171"
-                      : "#10b981",
+                    compilationResults[activeProgramIdx]?.isWarning
+                      ? "#f59e0b" // Orange for issues but synced
+                      : compilationResults[activeProgramIdx]?.status === "error"
+                      ? "#f87171" // Red for hard failure
+                      : "#34d399", // Green for success
                   whiteSpace: "pre-wrap",
+                  letterSpacing: "0.2px",
                 }}
               >
                 {compilationResults[activeProgramIdx]?.output ||
-                  "> Waiting for build..."}
+                  "> [READY] Waiting for build sequence..."}
               </pre>
             </div>
           </div>
@@ -1143,12 +1269,25 @@ export default function CIESession() {
         * {
           box-sizing: border-box;
         }
+        /* Custom Professional Scrollbar */
         ::-webkit-scrollbar {
-          width: 4px;
+          width: 6px;
+          height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+          background: #020617;
         }
         ::-webkit-scrollbar-thumb {
           background: #1e293b;
           border-radius: 10px;
+          border: 1px solid #020617;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+          background: #334155;
+        }
+        pre {
+          scrollbar-width: thin;
+          scrollbar-color: #1e293b #020617;
         }
       `}</style>
     </div>

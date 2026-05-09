@@ -1,5 +1,4 @@
 import { useState, useEffect } from "react";
-import Head from "next/head";
 import { useRouter } from "next/router";
 import { db, auth } from "@/lib/firebase";
 import {
@@ -36,6 +35,7 @@ import {
   Search,
 } from "lucide-react";
 import * as XLSX from "xlsx";
+import { labsData } from "@/lib/labs";
 
 export default function AdminDashboard() {
   const router = useRouter();
@@ -53,6 +53,7 @@ export default function AdminDashboard() {
     duration: 45,
     programs: "1,2",
     targetYear: "All",
+    targetUsns: "", // Added to prevent undefined split errors
   });
   const [importing, setImporting] = useState(false);
   const [editingScores, setEditingScores] = useState(null);
@@ -91,12 +92,26 @@ export default function AdminDashboard() {
     return () => unsubscribeAuth();
   }, []);
 
+  useEffect(() => {
+    document.title = "Admin Command | CIE Portal";
+  }, []);
+
   const fetchData = async () => {
-    // Legacy manual refresh if needed, but onSnapshot handles it now
     setLoading(true);
-    const subSnap = await getDocs(collection(db, "submissions"));
-    setSubmissions(subSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
-    setLoading(false);
+    try {
+      const subSnap = await getDocs(collection(db, "submissions"));
+      setSubmissions(subSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      
+      const cieSnap = await getDocs(collection(db, "cies"));
+      setCies(cieSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
+
+      const userSnap = await getDocs(collection(db, "users"));
+      setStudents(userSnap.docs.map((d) => ({ id: d.id, ...d.data() })).filter(u => u.role === 'student'));
+    } catch (err) {
+      console.error("Manual refresh failed:", err);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const updateSubmissionScore = async () => {
@@ -236,6 +251,30 @@ export default function AdminDashboard() {
     XLSX.writeFile(wb, "Student_Import_Template.xlsx");
   };
 
+  const exportResults = (cieId) => {
+    const cie = cies.find((c) => c.id === cieId);
+    const cieSubmissions = submissions.filter((s) => s.cieId === cieId);
+    
+    const data = cieSubmissions.map((sub) => {
+      const s = students.find((u) => u.id === sub.studentId) || {};
+      return {
+        "Student Name": s.name || sub.studentEmail,
+        "USN": s.usn || sub.studentId,
+        "Email": sub.studentEmail,
+        "Score": sub.totalScore?.toFixed(1) || "N/A",
+        "Status": sub.status?.toUpperCase(),
+        "Strikes": sub.strikes || 0,
+        "Lock Reason": sub.lockReason || "N/A",
+        "Submitted At": sub.submittedAt ? sub.submittedAt.toDate().toLocaleString() : "N/A",
+      };
+    });
+
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Results");
+    XLSX.writeFile(wb, `${cie?.title || "CIE"}_Results.xlsx`);
+  };
+
   const deleteStudent = async (id) => {
     if (confirm("Delete student?")) {
       await deleteDoc(doc(db, "users", id));
@@ -283,11 +322,12 @@ export default function AdminDashboard() {
   };
 
   const studentGroups = {
-    "2nd Year": students.filter((s) => s.year === "2" || s.year === "2nd"),
-    "3rd Year": students.filter((s) => s.year === "3" || s.year === "3rd"),
-    "4th Year": students.filter((s) => s.year === "4" || s.year === "4th"),
+    "2nd Year": students.filter((s) => s.year === "2" || s.year === "2nd" || (s.usn && s.usn.startsWith("1RN22"))),
+    "3rd Year": students.filter((s) => s.year === "3" || s.year === "3rd" || (s.usn && s.usn.startsWith("1RN21"))),
+    "4th Year": students.filter((s) => s.year === "4" || s.year === "4th" || (s.usn && s.usn.startsWith("1RN20"))),
     Others: students.filter(
-      (s) => !["2", "3", "4", "2nd", "3rd", "4th"].includes(s.year),
+      (s) => !["2", "3", "4", "2nd", "3rd", "4th"].includes(s.year) && 
+             !(s.usn && (s.usn.startsWith("1RN22") || s.usn.startsWith("1RN21") || s.usn.startsWith("1RN20")))
     ),
   };
 
@@ -308,9 +348,6 @@ export default function AdminDashboard() {
 
   return (
     <div style={{ background: "#f8fafc", minHeight: "100vh" }}>
-      <Head>
-        <title>Admin Command | CIE Portal</title>
-      </Head>
 
       <nav
         style={{
@@ -752,6 +789,27 @@ export default function AdminDashboard() {
             <section>
               {!selectedCieId ? (
                 <div>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(4, 1fr)",
+                      gap: "20px",
+                      marginBottom: "40px",
+                    }}
+                  >
+                    {[
+                      { label: "TOTAL SUBMISSIONS", value: submissions.length, color: "#0f172a" },
+                      { label: "AVG SCORE", value: (submissions.reduce((acc, s) => acc + (s.totalScore || 0), 0) / (submissions.filter(s => s.totalScore !== undefined).length || 1)).toFixed(1) + "/10", color: "#10b981" },
+                      { label: "LOCKED SESSIONS", value: submissions.filter(s => s.status === 'locked').length, color: "#ef4444" },
+                      { label: "PENDING EVAL", value: submissions.filter(s => s.status === 'completed' && !s.totalScore).length, color: "#f59e0b" },
+                    ].map((stat, i) => (
+                      <div key={i} className="premium-card" style={{ padding: "20px", background: "white", border: `1px solid ${stat.color}20` }}>
+                        <div style={{ fontSize: "10px", fontWeight: "900", color: "#64748b", marginBottom: "10px" }}>{stat.label}</div>
+                        <div style={{ fontSize: "28px", fontWeight: "900", color: stat.color }}>{stat.value}</div>
+                      </div>
+                    ))}
+                  </div>
+
                   <h2 style={{ marginBottom: "30px" }}>
                     Select CIE to View Results
                   </h2>
@@ -817,12 +875,21 @@ export default function AdminDashboard() {
                       marginBottom: "30px",
                     }}
                   >
-                    <button
-                      onClick={() => setSelectedCieId(null)}
-                      className="btn"
-                    >
-                      ← BACK TO LIST
-                    </button>
+                    <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+                      <button
+                        onClick={() => setSelectedCieId(null)}
+                        className="btn"
+                      >
+                        ← BACK TO LIST
+                      </button>
+                      <button
+                        onClick={() => exportResults(selectedCieId)}
+                        className="btn"
+                        style={{ background: "#10b981", color: "white" }}
+                      >
+                        <Download size={16} /> EXPORT EXCEL
+                      </button>
+                    </div>
                     <h2 style={{ margin: 0 }}>
                       Report: {cies.find((c) => c.id === selectedCieId)?.title}
                     </h2>
@@ -832,6 +899,7 @@ export default function AdminDashboard() {
                       <tr style={{ color: "#64748b", fontSize: "13px" }}>
                         <th>STUDENT</th>
                         <th>SCORE</th>
+                        <th>DURATION</th>
                         <th>STATUS</th>
                         <th>INTEGRITY REASON</th>
                         <th>ACTION</th>
@@ -857,9 +925,15 @@ export default function AdminDashboard() {
                               style={{ borderBottom: "1px solid #f1f5f9" }}
                             >
                               <td style={{ padding: "20px 0" }}>
-                                <strong>{s.name}</strong>
-                                <br />
-                                <small>{s.usn}</small>
+                                <div style={{ display: "flex", flexDirection: "column" }}>
+                                  <strong>{s.name}</strong>
+                                  <small style={{ color: "#64748b" }}>{s.usn}</small>
+                                  {sub.aiScore?.feedback && (
+                                    <span style={{ fontSize: "10px", color: "#10b981", marginTop: "4px", fontStyle: "italic", maxWidth: "200px" }}>
+                                      "{(sub.aiScore.feedback.length > 50 ? sub.aiScore.feedback.substring(0, 50) + "..." : sub.aiScore.feedback)}"
+                                    </span>
+                                  )}
+                                </div>
                               </td>
                               <td
                                 style={{
@@ -868,9 +942,20 @@ export default function AdminDashboard() {
                                   fontSize: "18px",
                                 }}
                               >
-                                {sub.totalScore !== undefined
-                                  ? `${sub.totalScore.toFixed(1)}/10`
+                                {sub.totalScore !== undefined && sub.totalScore !== null
+                                  ? `${Number(sub.totalScore).toFixed(1)}/10`
                                   : "—"}
+                              </td>
+                              <td>
+                                <span style={{ fontSize: "11px", color: "#64748b" }}>
+                                  {(() => {
+                                    if (!sub.startedAt || !sub.submittedAt) return "—";
+                                    const diff = sub.submittedAt.toMillis() - sub.startedAt.toMillis();
+                                    const mins = Math.floor(diff / 60000);
+                                    const secs = Math.floor((diff % 60000) / 1000);
+                                    return `${mins}m ${secs}s`;
+                                  })()}
+                                </span>
                               </td>
                               <td>
                                 <span
@@ -893,7 +978,7 @@ export default function AdminDashboard() {
                                 >
                                   {isEvaluating
                                     ? "EVALUATING"
-                                    : sub.status.toUpperCase()}
+                                    : (sub.status || "PENDING").toUpperCase()}
                                 </span>
                               </td>
                               <td
@@ -921,6 +1006,7 @@ export default function AdminDashboard() {
                                         const btn = document.activeElement;
                                         btn.innerText = "⏳...";
                                         try {
+                                          const idToken = await auth.currentUser.getIdToken();
                                           await fetch(
                                             "/api/submissions/score",
                                             {
@@ -928,15 +1014,15 @@ export default function AdminDashboard() {
                                               headers: {
                                                 "Content-Type":
                                                   "application/json",
+                                                "Authorization": `Bearer ${idToken}`
                                               },
                                               body: JSON.stringify({
                                                 submissionId: sub.id,
-                                                studentCode:
-                                                  sub.codes?.[0] || "",
-                                                programTitle:
-                                                  "Manual Evaluation",
-                                                programDescription:
-                                                  "Admin triggered manual check",
+                                                codes: sub.codes || [],
+                                                programs: cies.find(c => c.id === sub.cieId)?.assignedProgramNos?.map(no => labsData.find(l => l.programNo === no)).filter(Boolean) || [],
+                                                studentCode: sub.codes?.[0] || "",
+                                                programTitle: cies.find(c => c.id === sub.cieId)?.title || "Manual Evaluation",
+                                                programDescription: "Admin triggered manual check",
                                               }),
                                             },
                                           );
@@ -1295,7 +1381,7 @@ export default function AdminDashboard() {
                     Score:{" "}
                     {editingScores
                       ? editingScores.total
-                      : viewingSubmission.totalScore?.toFixed(1) || "0.0"}
+                      : Number(viewingSubmission.totalScore || 0).toFixed(1)}
                     /10
                   </p>
                 </div>

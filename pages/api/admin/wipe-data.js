@@ -6,12 +6,16 @@ export default async function handler(req, res) {
   try {
     const results = { usersDeleted: 0, ciesDeleted: 0, subsDeleted: 0, logsDeleted: 0 };
 
-    // 1. Wipe Students (Auth + Firestore)
-    const userSnap = await adminDb.collection('users').where('role', '==', 'student').get();
+    // 1. Wipe ALL Users (Auth + Firestore) - Includes Admins
+    const userSnap = await adminDb.collection('users').get();
     for (const doc of userSnap.docs) {
       try {
-        await adminAuth.deleteUser(doc.id); // doc.id is USN
-      } catch (e) {}
+        // Delete from Firebase Auth
+        await adminAuth.deleteUser(doc.id); 
+      } catch (e) {
+        // If user doesn't exist in Auth but exists in Firestore, ignore error
+      }
+      // Delete from Firestore
       await adminDb.collection('users').doc(doc.id).delete();
       results.usersDeleted++;
     }
@@ -37,7 +41,11 @@ export default async function handler(req, res) {
       results.logsDeleted++;
     }
 
-    return res.status(200).json({ message: "SYSTEM WIPE COMPLETE", results });
+    return res.status(200).json({ 
+      message: "NUCLEAR SYSTEM WIPE COMPLETE", 
+      status: "FRESH",
+      results 
+    });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }

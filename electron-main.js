@@ -12,6 +12,21 @@ const isDev = !app.isPackaged;
 
 let mainWindow;
 let focusRecoveryInterval = null;
+const { exec } = require("child_process");
+
+// ═══════════════════════════════════════════════════════════════
+//  WINDOWS TASKBAR SUPPRESSION (NUCLEAR OPTION)
+// ═══════════════════════════════════════════════════════════════
+function setTaskbarVisibility(visible) {
+  if (process.platform !== "win32") return;
+  const showCmd = visible ? 5 : 0; 
+  // Simplified PowerShell command with better escaping
+  const psCommand = `powershell -command "$t='[DllImport(\\"user32.dll\\")]public static extern int ShowWindow(int h,int n);[DllImport(\\"user32.dll\\")]public static extern int FindWindow(string c,string n);';$type=Add-Type -MemberDefinition $t -Name 'W' -Namespace 'N' -PassThru;$type::ShowWindow($type::FindWindow('Shell_TrayWnd',$null),${showCmd});$type::ShowWindow($type::FindWindow('Button',$null),${showCmd});$type::ShowWindow($type::FindWindow('Shell_SecondaryTrayWnd',$null),${showCmd});$type::ShowWindow($type::FindWindow('TrayNotifyWnd',$null),${showCmd});"`;
+  
+  exec(psCommand, (err) => {
+    if (err) console.error("Taskbar Toggle Error:", err);
+  });
+}
 
 // ═══════════════════════════════════════════════════════════════
 //  SINGLE INSTANCE LOCK — Only ONE instance of the app can run
@@ -32,30 +47,32 @@ function createWindow() {
   const { width, height } = primaryDisplay.bounds; // Use bounds, NOT workAreaSize (which excludes the taskbar)
 
   mainWindow = new BrowserWindow({
-    fullscreen: true,
-    kiosk: true,
-    // 'screen-saver' is the HIGHEST always-on-top level —
-    // sits above ALL other windows including Task Manager, notifications, overlays
+    width,
+    height,
+    x: 0,
+    y: 0,
+    show: false, // Start hidden to prevent flicker
+    kiosk: true, // Force Kiosk Mode immediately
     alwaysOnTop: true,
-    skipTaskbar: true, // Hide from taskbar to prevent switching
-    autoHideMenuBar: true, // Prevents top menu from showing
-    frame: false, // No title bar, no close/min/max buttons
-    resizable: false, // Can't resize
-    movable: false, // Can't move the window
-    minimizable: false, // Can't minimize
-    maximizable: false, // Can't be toggled out of fullscreen
-    closable: false, // Can't close via OS (only via app:quit IPC)
+    skipTaskbar: true,
+    autoHideMenuBar: true,
+    frame: false,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    closable: false,
     backgroundColor: "#020617",
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, "preload.js"),
-      // Security restored (Fixes Monaco ENOENT)
       webSecurity: true,
       sandbox: true,
       allowRunningInsecureContent: false,
       experimentalFeatures: false,
       spellcheck: false,
+      devTools: false, // Strictly disable DevTools
     },
   });
 
@@ -101,10 +118,11 @@ function createWindow() {
 
   // Force true fullscreen over taskbar instantly right before showing
   mainWindow.once("ready-to-show", () => {
-    mainWindow.maximize();
-    mainWindow.setFullScreen(true);
-    mainWindow.setAlwaysOnTop(true, "screen-saver");
+    setTaskbarVisibility(false); // 🚨 HIDE SYSTEM TASKBAR (ALL TRAYS)
+    mainWindow.setKiosk(true); 
+    mainWindow.setAlwaysOnTop(true, "screen-saver", 1);
     mainWindow.show();
+    mainWindow.focus();
   });
 
   mainWindow.on("closed", () => {
@@ -114,6 +132,7 @@ function createWindow() {
 
   // Handle Quit from Frontend (ONLY way to close)
   ipcMain.on("app:quit", () => {
+    setTaskbarVisibility(true); // 🚨 RESTORE TASKBAR BEFORE QUIT
     forceQuit();
   });
 
@@ -143,6 +162,29 @@ function createWindow() {
     notifyScreenshotBlocked();
     return false;
   });
+
+  // 🚨 ADDITIONAL SCREEN RECORDING BLOCKS (Game Bar, etc.)
+  globalShortcut.register("Meta+G", () => false);
+  globalShortcut.register("Meta+Alt+G", () => false);
+  globalShortcut.register("Meta+Alt+R", () => false);
+  globalShortcut.register("Meta+Alt+B", () => false);
+  globalShortcut.register("Meta+Alt+M", () => false);
+  
+  // Block common 3rd party screenshot keys (Lightshot, etc.)
+  globalShortcut.register("Shift+PrintScreen", () => false);
+  globalShortcut.register("Control+PrintScreen", () => false);
+
+  // ═══════════════════════════════════════════════
+  //  BLOCK RELOAD / DEVTOOLS / SYSTEM SHORTCUTS
+  // ═══════════════════════════════════════════════
+
+  // Block Refresh (Crucial: prevents strike count reset)
+  globalShortcut.register("CommandOrControl+R", () => false);
+  globalShortcut.register("F5", () => false);
+  globalShortcut.register("CommandOrControl+Shift+R", () => false);
+
+  // Block DevTools (Alternative to F12)
+  globalShortcut.register("F12", () => false);
 
   // ═══════════════════════════════════════════════
   //  BLOCK TASK SWITCHING / OVERLAYS / SPLIT SCREEN
@@ -194,6 +236,14 @@ function createWindow() {
   // Block Task Manager shortcut
   globalShortcut.register("Control+Shift+Escape", () => false);
 
+  // 🚨 EMERGENCY EXIT (Development Only)
+  // Allows the developer to exit kiosk mode if the app hangs
+  if (isDev) {
+    globalShortcut.register("CommandOrControl+Alt+Shift+Q", () => {
+      forceQuit();
+    });
+  }
+
   // Block Clipboard Shortcuts (Global Lockdown)
   globalShortcut.register("CommandOrControl+C", () => false);
   globalShortcut.register("CommandOrControl+V", () => false);
@@ -211,25 +261,63 @@ function createWindow() {
   // Block Ctrl+Escape (Start menu)
   globalShortcut.register("Control+Escape", () => false);
 
-    // Block the Windows Key alone
-    // Removed "Super" shortcut as it causes "conversion failure" crash on some Windows environments
-    // globalShortcut.register("Super", () => false);
+  // Block Alt+Space (System window menu)
+  globalShortcut.register("Alt+Space", () => false);
+
+    // Windows key alone (Super) is difficult to block via globalShortcut without crashing on some systems.
+    // Instead, we rely on the aggressive Focus Recovery loop and Kiosk mode to keep the app on top.
+
+    // Block Windows + any number (Taskbar pinning)
+    for (let i = 0; i <= 9; i++) {
+      globalShortcut.register(`Meta+${i}`, () => false);
+    }
+
+    // Block common screenshot/recording keys for 3rd party apps (like Nvidia, Steam)
+    globalShortcut.register("Alt+F10", () => false);
+    globalShortcut.register("Alt+F1", () => false);
+    globalShortcut.register("Alt+Z", () => false);
+    globalShortcut.register("Control+Alt+S", () => false);
 
 
   // ═══════════════════════════════════════════════
   //  FOCUS RECOVERY — If app loses focus, GRAB IT BACK
   // ═══════════════════════════════════════════════
   mainWindow.on("blur", () => {
-    // Immediately reclaim focus
+    // 🚨 SAFETY BLACKOUT: If focus is lost, make window invisible 
+    // to prevent any recording software from capturing it while it's in the background
+    mainWindow.setOpacity(0);
     forceFocus();
+  });
+
+  mainWindow.on("focus", () => {
+    mainWindow.setOpacity(1); // Restore visibility when focused
   });
 
   // Aggressive focus recovery every 500ms
   focusRecoveryInterval = setInterval(() => {
     if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isFocused()) {
+      mainWindow.setOpacity(0); // Hide if not focused
       forceFocus();
     }
   }, 500);
+
+  // ═══════════════════════════════════════════════
+  //  HARDWARE-LEVEL SECURITY: MULTIPLE DISPLAYS
+  // ═══════════════════════════════════════════════
+  const checkDisplays = () => {
+    const displays = screen.getAllDisplays();
+    if (displays.length > 1) {
+      mainWindow.webContents.send("security-violation", "Secondary Display Detected (HDMI Capture Blocked)");
+      // We can also just hide the content
+      mainWindow.setOpacity(0); 
+    } else {
+      mainWindow.setOpacity(1);
+    }
+  };
+
+  screen.on('display-added', checkDisplays);
+  screen.on('display-removed', checkDisplays);
+  setInterval(checkDisplays, 3000); // Periodic check
 
   // ═══════════════════════════════════════════════
   //  BLOCK SCREEN CAPTURE API ACCESS
@@ -303,6 +391,10 @@ function forceFocus() {
     mainWindow.moveTop();
   }
 }
+
+app.on("before-quit", () => {
+  setTaskbarVisibility(true);
+});
 
 function forceQuit() {
   // Unregister all shortcuts before quitting

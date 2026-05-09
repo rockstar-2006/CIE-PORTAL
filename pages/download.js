@@ -1,4 +1,4 @@
-import Head from "next/head";
+import { useEffect } from "react";
 import {
   ShieldCheck,
   Download,
@@ -8,6 +8,10 @@ import {
 } from "lucide-react";
 
 export default function DownloadPage() {
+  useEffect(() => {
+    document.title = "Secure Launcher | CIE Portal";
+  }, []);
+
   return (
     <div
       style={{
@@ -17,10 +21,6 @@ export default function DownloadPage() {
         fontFamily: "system-ui, sans-serif",
       }}
     >
-      <Head>
-        <title>Secure Launcher | CIE Portal</title>
-      </Head>
-
       <nav
         style={{
           padding: "30px 60px",
