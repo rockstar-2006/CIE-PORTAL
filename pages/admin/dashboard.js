@@ -35,6 +35,7 @@ import {
   Search,
 } from "lucide-react";
 import * as XLSX from "xlsx";
+import axios from "axios";
 import { labsData } from "@/lib/labs";
 
 export default function AdminDashboard() {
@@ -54,9 +55,14 @@ export default function AdminDashboard() {
     programs: "1,2",
     targetYear: "All",
     targetUsns: "", // Added to prevent undefined split errors
+    language: "flutter",
   });
   const [importing, setImporting] = useState(false);
   const [editingScores, setEditingScores] = useState(null);
+  const [isParsingManual, setIsParsingManual] = useState(false);
+  const [scrapedPrograms, setScrapedPrograms] = useState([]);
+  const [manuals, setManuals] = useState([]);
+  const [uploadingManual, setUploadingManual] = useState(false);
 
   useEffect(() => {
     const unsubscribeAuth = auth.onAuthStateChanged((user) => {
@@ -81,9 +87,15 @@ export default function AdminDashboard() {
           setLoading(false);
         });
 
+        // 4. Real-time Lab Manuals
+        const unsubManuals = onSnapshot(collection(db, "lab_manuals"), (snap) => {
+          setManuals(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+        });
+
         return () => {
           unsubCies();
           unsubSubs();
+          unsubManuals();
         };
       } else {
         router.push("/");
@@ -282,6 +294,90 @@ export default function AdminDashboard() {
     }
   };
 
+  const handleManualUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    setIsParsingManual(true);
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const res = await axios.post("/api/admin/parse-manual", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      if (res.data.programs) {
+        setScrapedPrograms(res.data.programs);
+        // Automatically fill program numbers based on count
+        const nos = res.data.programs.map((_, i) => i + 1).join(",");
+        setNewCie((prev) => ({ ...prev, programs: nos }));
+        alert(
+          `AI extracted ${res.data.programs.length} programs from the manual!`,
+        );
+      }
+    } catch (err) {
+      console.error("Manual parsing failed:", err);
+      let msg = "Unknown error";
+      if (err.response) {
+        msg = typeof err.response.data === 'string' && err.response.data.includes('<!DOCTYPE html>')
+          ? "Server Crashed (Check Console)"
+          : err.response.data?.error || err.message;
+      } else {
+        msg = err.message;
+      }
+      alert(`❌ AI Manual Parsing failed.\n\nError: ${msg}\n\nYou can still enter program numbers manually.`);
+    } finally {
+      setIsParsingManual(false);
+    }
+  };
+
+  const handleStandaloneManualUpload = async (e, language) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    setUploadingManual(true);
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const res = await axios.post("/api/admin/parse-manual", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+        timeout: 60000, // 60 seconds timeout
+      });
+      
+      if (res.data.programs) {
+        const manualId = `${language}-${Date.now()}`;
+        await setDoc(doc(db, "lab_manuals", manualId), {
+          language,
+          fileName: file.name,
+          programCount: res.data.programs.length,
+          programs: res.data.programs,
+          uploadedAt: Timestamp.now(),
+        });
+        alert(`✅ Success: ${language.toUpperCase()} Manual uploaded with ${res.data.programs.length} programs.`);
+      }
+    } catch (err) {
+      console.error("Manual upload failed:", err);
+      let msg = "Unknown error";
+      if (err.response) {
+        msg = typeof err.response.data === 'string' && err.response.data.includes('<!DOCTYPE html>')
+          ? "Server Crashed (Check Console)"
+          : err.response.data?.error || err.message;
+      } else {
+        msg = err.message;
+      }
+      alert(`❌ Failed to parse or upload manual.\n\nError: ${msg}`);
+    } finally {
+      setUploadingManual(false);
+    }
+  };
+
+  const deleteManual = async (id) => {
+    if (confirm("Delete this lab manual? This will not affect existing CIEs.")) {
+      await deleteDoc(doc(db, "lab_manuals", id));
+    }
+  };
+
   const handleCreateCie = async (e) => {
     e.preventDefault();
     try {
@@ -304,6 +400,8 @@ export default function AdminDashboard() {
         assignedProgramNos: progIds,
         targetYear: newCie.targetYear,
         targetUsns: targetUsns,
+        language: newCie.language || "flutter",
+        manualPrograms: scrapedPrograms, // Store the scraped titles for students to see
         status: "active",
         createdAt: Timestamp.now(),
       });
@@ -443,7 +541,7 @@ export default function AdminDashboard() {
             boxShadow: "0 4px 6px -1px rgba(0,0,0,0.05)",
           }}
         >
-          {["students", "cies", "results"].map((tab) => (
+          {["students", "cies", "results", "manuals"].map((tab) => (
             <button
               key={tab}
               onClick={() => {
@@ -1075,6 +1173,125 @@ export default function AdminDashboard() {
               )}
             </section>
           )}
+
+          {activeTab === "manuals" && (
+            <section>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "40px" }}>
+                <div>
+                  <h2 style={{ margin: 0 }}>Lab Manual Repository</h2>
+                  <p style={{ color: "#64748b", margin: "5px 0 0", fontSize: "14px" }}>Upload and manage laboratory manuals for automated program extraction.</p>
+                </div>
+                <div style={{ display: "flex", gap: "15px" }}>
+                  <div style={{ position: "relative" }}>
+                    <button className="btn btn-primary" style={{ background: "#0f172a", display: "flex", alignItems: "center", gap: "10px" }}>
+                      <Plus size={18} /> UPLOAD MANUAL
+                    </button>
+                    <div style={{ 
+                      position: "absolute", top: 0, left: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer",
+                      display: "flex"
+                    }}>
+                      {["c", "cpp", "java", "flutter"].map(lang => (
+                        <label key={lang} style={{ flex: 1, cursor: "pointer" }}>
+                          <input type="file" hidden accept=".pdf" onChange={(e) => handleStandaloneManualUpload(e, lang)} />
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* STATS OVERVIEW */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "20px", marginBottom: "40px" }}>
+                {[
+                  { label: "TOTAL MANUALS", value: manuals.length, color: "#0f172a", icon: BookOpen },
+                  { label: "C / C++", value: manuals.filter(m => m.language === 'c' || m.language === 'cpp').length, color: "#10b981", icon: Code },
+                  { label: "JAVA", value: manuals.filter(m => m.language === 'java').length, color: "#f59e0b", icon: Database },
+                  { label: "TOTAL PROGRAMS", value: manuals.reduce((acc, m) => acc + (m.programCount || 0), 0), color: "#6366f1", icon: Folder },
+                ].map((stat, i) => (
+                  <div key={i} className="premium-card" style={{ padding: "25px", background: "white", border: "1px solid #e2e8f0" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "15px" }}>
+                      <div style={{ padding: "10px", background: `${stat.color}10`, color: stat.color, borderRadius: "12px" }}>
+                        <stat.icon size={20} />
+                      </div>
+                      <div style={{ fontSize: "24px", fontWeight: "900", color: stat.color }}>{stat.value}</div>
+                    </div>
+                    <div style={{ fontSize: "10px", fontWeight: "900", color: "#64748b", letterSpacing: "1px" }}>{stat.label}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* UPLOAD CARDS */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "20px", marginBottom: "40px", position: "relative" }}>
+                {uploadingManual && (
+                  <div style={{ 
+                    position: "absolute", inset: 0, background: "rgba(255,255,255,0.7)", zIndex: 10,
+                    display: "flex", alignItems: "center", justifyContent: "center", borderRadius: "24px",
+                    backdropFilter: "blur(2px)", border: "2px solid #10b981"
+                  }}>
+                    <div style={{ textAlign: "center" }}>
+                      <RefreshCcw size={40} className="spin" color="#10b981" style={{ marginBottom: "15px" }} />
+                      <div style={{ fontWeight: "900", color: "#0f172a" }}>AI EXTRACTING PROGRAMS...</div>
+                      <div style={{ fontSize: "12px", color: "#64748b" }}>This may take up to 30 seconds for large manuals</div>
+                    </div>
+                  </div>
+                )}
+                {["c", "cpp", "java", "flutter"].map(lang => (
+                   <label key={lang} className="premium-card" style={{ 
+                     padding: "20px", textAlign: "center", border: "2px dashed #e2e8f0", 
+                     cursor: uploadingManual ? "not-allowed" : "pointer", background: "#f8fafc",
+                     opacity: uploadingManual ? 0.5 : 1
+                   }}>
+                     <input type="file" hidden accept=".pdf" disabled={uploadingManual} onChange={(e) => handleStandaloneManualUpload(e, lang)} />
+                     <div style={{ color: "#64748b", fontSize: "11px", fontWeight: "bold", marginBottom: "5px" }}>UPLOAD {lang.toUpperCase()}</div>
+                     <Plus size={20} color="#94a3b8" style={{ margin: "0 auto" }} />
+                   </label>
+                ))}
+              </div>
+
+              {/* MANUAL LIST */}
+              {manuals.length === 0 ? (
+                <div style={{ textAlign: "center", padding: "80px", background: "#f8fafc", borderRadius: "32px", border: "1px solid #e2e8f0" }}>
+                  <BookOpen size={48} color="#94a3b8" style={{ marginBottom: "20px", opacity: 0.5 }} />
+                  <h3 style={{ color: "#0f172a" }}>No Manuals Uploaded</h3>
+                  <p style={{ color: "#64748b" }}>Upload PDF manuals to enable AI program extraction for CIEs.</p>
+                </div>
+              ) : (
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(350px, 1fr))", gap: "20px" }}>
+                  {manuals.map(m => (
+                    <div key={m.id} className="premium-card" style={{ padding: "25px", background: "white", border: "1px solid #e2e8f0", position: "relative" }}>
+                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start" }}>
+                          <div>
+                            <span style={{ 
+                              fontSize: "10px", fontWeight: "900", color: "white", 
+                              background: m.language === 'c' ? '#10b981' : m.language === 'java' ? '#f59e0b' : '#6366f1',
+                              padding: "4px 10px", borderRadius: "20px", textTransform: "uppercase"
+                            }}>{m.language}</span>
+                            <h4 style={{ margin: "15px 0 5px", color: "#0f172a" }}>{m.fileName}</h4>
+                            <p style={{ fontSize: "12px", color: "#64748b", margin: 0 }}>
+                              {m.programCount} Programs Detected • {m.uploadedAt?.toDate().toLocaleDateString()}
+                            </p>
+                          </div>
+                          <button onClick={() => deleteManual(m.id)} style={{ color: "#ef4444", background: "none", border: "none", cursor: "pointer" }}>
+                            <Trash2 size={18} />
+                          </button>
+                       </div>
+                       <div style={{ marginTop: "20px", padding: "15px", background: "#f8fafc", borderRadius: "12px", maxHeight: "150px", overflowY: "auto" }}>
+                          <div style={{ fontSize: "10px", fontWeight: "900", color: "#94a3b8", marginBottom: "10px" }}>EXTRACTED TITLES</div>
+                          {m.programs?.slice(0, 5).map((p, i) => (
+                            <div key={i} style={{ fontSize: "11px", color: "#475569", marginBottom: "5px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                              {i + 1}. {p}
+                            </div>
+                          ))}
+                          {m.programs?.length > 5 && (
+                            <div style={{ fontSize: "10px", color: "#10b981", fontWeight: "bold" }}>+{m.programs.length - 5} more programs...</div>
+                          )}
+                       </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
         </div>
 
         {/* MODAL: CREATE CIE */}
@@ -1097,28 +1314,58 @@ export default function AdminDashboard() {
               style={{ maxWidth: "500px", width: "100%", padding: "40px" }}
             >
               <h2 style={{ marginBottom: "30px" }}>Create New CIE</h2>
-              <div style={{ marginBottom: "20px" }}>
-                <label
-                  style={{
-                    display: "block",
-                    marginBottom: "8px",
-                    fontSize: "12px",
-                    fontWeight: "bold",
-                  }}
-                >
-                  EXAM TITLE
-                </label>
-                <input
-                  type="text"
-                  style={{ width: "100%" }}
-                  value={newCie.title}
-                  onChange={(e) =>
-                    setNewCie({ ...newCie, title: e.target.value })
-                  }
-                  placeholder="e.g. Flutter Lab Test 01"
-                  required
-                />
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px", marginBottom: "20px" }}>
+                <div>
+                  <label style={{ display: "block", marginBottom: "8px", fontSize: "12px", fontWeight: "bold" }}>LANGUAGE</label>
+                  <select
+                    style={{ width: "100%", padding: "12px", borderRadius: "12px", border: "1px solid #e2e8f0" }}
+                    value={newCie.language || "flutter"}
+                    onChange={(e) => {
+                      const lang = e.target.value;
+                      setNewCie({ ...newCie, language: lang });
+                      // Reset manual if language changes
+                      setScrapedPrograms([]); 
+                    }}
+                  >
+                    <option value="flutter">Flutter / Dart</option>
+                    <option value="c">C Language</option>
+                    <option value="cpp">C++ Language</option>
+                    <option value="java">Java Language</option>
+                  </select>
+                </div>
+                <div>
+                  <label style={{ display: "block", marginBottom: "8px", fontSize: "12px", fontWeight: "bold" }}>EXAM TITLE</label>
+                  <input
+                    type="text"
+                    style={{ width: "100%" }}
+                    value={newCie.title}
+                    onChange={(e) => setNewCie({ ...newCie, title: e.target.value })}
+                    placeholder="e.g. Lab Test 01"
+                    required
+                  />
+                </div>
               </div>
+
+              {newCie.language !== 'flutter' && (
+                <div style={{ marginBottom: "20px" }}>
+                  <label style={{ display: "block", marginBottom: "8px", fontSize: "12px", fontWeight: "bold", color: "#6366f1" }}>SELECT LAB MANUAL</label>
+                  <select
+                    style={{ width: "100%", padding: "12px", borderRadius: "12px", border: "1px solid #6366f1", background: "#f5f3ff" }}
+                    onChange={(e) => {
+                      const manual = manuals.find(m => m.id === e.target.value);
+                      if (manual) {
+                        setScrapedPrograms(manual.programs);
+                        alert(`📖 Loaded manual: ${manual.fileName} (${manual.programs.length} programs)`);
+                      }
+                    }}
+                  >
+                    <option value="">-- Choose from Repository --</option>
+                    {manuals.filter(m => m.language === newCie.language).map(m => (
+                      <option key={m.id} value={m.id}>{m.fileName} ({m.programCount} progs)</option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div
                 style={{
                   display: "grid",
@@ -1284,26 +1531,58 @@ export default function AdminDashboard() {
               )}
 
               <div style={{ marginBottom: "30px" }}>
-                <label
-                  style={{
-                    display: "block",
-                    marginBottom: "8px",
-                    fontSize: "12px",
-                    fontWeight: "bold",
-                  }}
-                >
-                  PROGRAM NOS (Comma separated)
-                </label>
-                <input
-                  type="text"
-                  style={{ width: "100%" }}
-                  value={newCie.programs}
-                  onChange={(e) =>
-                    setNewCie({ ...newCie, programs: e.target.value })
-                  }
-                  placeholder="e.g. 1, 4, 7"
-                  required
-                />
+                <div style={{ marginBottom: "20px" }}>
+                  <label style={{ display: "block", marginBottom: "8px", fontSize: "12px", fontWeight: "bold", color: "#10b981" }}>
+                    SELECT LAB MANUAL
+                  </label>
+                  <select 
+                    style={{ width: "100%", padding: "12px", borderRadius: "12px", border: "1px solid #10b981", background: "#f0fdf4", fontSize: "12px" }}
+                    onChange={(e) => {
+                      const manual = manuals.find(m => m.id === e.target.value);
+                      if (manual) {
+                        setScrapedPrograms(manual.programs);
+                        const nos = manual.programs.map((_, i) => i + 1).join(",");
+                        setNewCie(prev => ({ ...prev, programs: nos }));
+                      }
+                    }}
+                  >
+                    <option value="">-- Select from Repository --</option>
+                    {manuals.filter(m => m.language === newCie.language).map(m => (
+                      <option key={m.id} value={m.id}>{m.fileName} ({m.programCount} progs)</option>
+                    ))}
+                  </select>
+                  <div style={{ marginTop: "10px", textAlign: "center", fontSize: "10px", color: "#64748b" }}>OR ONE-OFF UPLOAD</div>
+                  <input
+                    type="file"
+                    accept=".pdf"
+                    onChange={handleManualUpload}
+                    style={{ width: "100%", fontSize: "12px", marginTop: "5px" }}
+                  />
+                  {isParsingManual && <span style={{ fontSize: "10px", color: "#10b981" }}>Parsing AI...</span>}
+                </div>
+
+                <div>
+                  <label
+                    style={{
+                      display: "block",
+                      marginBottom: "8px",
+                      fontSize: "12px",
+                      fontWeight: "bold",
+                    }}
+                  >
+                    PROGRAM NOS (Comma separated)
+                  </label>
+                  <input
+                    type="text"
+                    style={{ width: "100%" }}
+                    value={newCie.programs}
+                    onChange={(e) =>
+                      setNewCie({ ...newCie, programs: e.target.value })
+                    }
+                    placeholder="e.g. 1, 2, 5"
+                    required
+                  />
+                </div>
               </div>
               <div style={{ display: "flex", gap: "15px" }}>
                 <button

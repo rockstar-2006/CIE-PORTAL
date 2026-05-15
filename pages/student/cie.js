@@ -57,6 +57,9 @@ export default function CIESession() {
   const [previewCode, setPreviewCode] = useState("");
   const [autoRun, setAutoRun] = useState(false); // DEFAULT TO OFF PER USER REQUEST
   const [isSyncing, setIsSyncing] = useState(false);
+  const [language, setLanguage] = useState("flutter");
+  const [programInputs, setProgramInputs] = useState([]);
+  const [showInputWarning, setShowInputWarning] = useState(false);
 
   const violationTimerRef = useRef(null);
   const strikesRef = useRef(0);
@@ -354,11 +357,13 @@ export default function CIESession() {
       }
 
       setPrograms(selectedProgs);
+      setLanguage(cieData.language || "flutter");
       const sessionCodes = selectedProgs.map(
         (p, i) => existingCodes?.[i] || p.boilerplate || "",
       );
       setCodes(sessionCodes);
       setCompilationResults(selectedProgs.map(() => null));
+      setProgramInputs(selectedProgs.map(() => ""));
 
       // ALWAYS default the Virtual Device (Preview) to a generic "Ready" screen on start
       // This ensures previous student code doesn't leak into the Phone view initially.
@@ -484,63 +489,107 @@ export default function CIESession() {
     setCompilationResults((prev) => {
       const n = [...prev];
       n[activeProgramIdx] = {
-        output: "⚡ COMPILING & DEPLOYING...",
+        output: "⚡ COMPILING & EXECUTING...",
         status: "loading",
       };
       return n;
     });
 
-    try {
-      const res = await axios.post("/api/compile", {
-        source: currentCode,
-        mode: "analyze",
-      });
-      
-      const { status, output, issues, isWarning } = res.data;
+    // 🚨 CASE 1: FLUTTER (Server-Side Analysis + Virtual Device)
+    if (language === "flutter") {
+      try {
+        const res = await axios.post("/api/compile", {
+          source: currentCode,
+          mode: "analyze",
+        });
 
-      setCompilationResults((prev) => {
-        const n = [...prev];
-        n[activeProgramIdx] = {
-          output: output,
-          status: status,
-          isWarning: isWarning,
-        };
-        return n;
-      });
+        const { status, output, issues, isWarning } = res.data;
 
-      // 🚨 UPDATE EDITOR MARKERS (Red Squiggles)
-      if (monacoRef.current && editorRef.current) {
-        const model = editorRef.current.getModel();
-        const monaco = monacoRef.current;
-        
-        const markers = (issues || []).map(issue => ({
-          startLineNumber: issue.line,
-          startColumn: issue.column,
-          endLineNumber: issue.line,
-          endColumn: issue.column + 5, // Approximate length
-          message: issue.message,
-          severity: issue.kind === 'error' ? monaco.MarkerSeverity.Error : monaco.MarkerSeverity.Warning,
-          source: 'Dart Build'
-        }));
+        setCompilationResults((prev) => {
+          const n = [...prev];
+          n[activeProgramIdx] = {
+            output: output,
+            status: status,
+            isWarning: isWarning,
+          };
+          return n;
+        });
 
-        // Combine with existing syntax markers if any
-        monaco.editor.setModelMarkers(model, 'dart-build', markers);
-      }
+        // 🚨 UPDATE EDITOR MARKERS (Red Squiggles)
+        if (monacoRef.current && editorRef.current) {
+          const model = editorRef.current.getModel();
+          const monaco = monacoRef.current;
 
-      if (status === "success") {
+          const markers = (issues || []).map((issue) => ({
+            startLineNumber: issue.line,
+            startColumn: issue.column,
+            endLineNumber: issue.line,
+            endColumn: issue.column + 5, // Approximate length
+            message: issue.message,
+            severity:
+              issue.kind === "error"
+                ? monaco.MarkerSeverity.Error
+                : monaco.MarkerSeverity.Warning,
+            source: "Dart Build",
+          }));
+
+          monaco.editor.setModelMarkers(model, "dart-build", markers);
+        }
+
+        if (status === "success") {
+          syncVirtualDevice(currentCode);
+        }
+      } catch (e) {
+        setCompilationResults((prev) => {
+          const n = [...prev];
+          n[activeProgramIdx] = {
+            output: "✅ SYNC COMPLETED\nAnalysis processed. Virtual Device updated.",
+            status: "success",
+          };
+          return n;
+        });
         syncVirtualDevice(currentCode);
       }
-    } catch (e) {
-      setCompilationResults((prev) => {
-        const n = [...prev];
-        n[activeProgramIdx] = { 
-          output: "✅ SYNC COMPLETED\nAnalysis processed. Virtual Device updated.", 
-          status: "success" 
-        };
-        return n;
-      });
-      // Fallback: Still sync the device even if the API route itself had a network hiccup
-      syncVirtualDevice(currentCode);
+    } 
+    // 🚨 CASE 2: C / C++ / JAVA (Local Execution)
+    else {
+      const inputRequired = currentCode.includes("scanf") || currentCode.includes("cin") || currentCode.includes("Scanner");
+      const currentInput = programInputs[activeProgramIdx];
+
+      if (inputRequired && !currentInput && !forceCode) { // Only show warning on manual runs, not auto-save/forceCode
+         setShowInputWarning(true);
+         return;
+      }
+
+      if (typeof window !== "undefined" && window.electronAPI?.compileLocal) {
+        try {
+          const result = await window.electronAPI.compileLocal({
+            language,
+            code: currentCode,
+            input: programInputs[activeProgramIdx]
+          });
+
+          setCompilationResults((prev) => {
+            const n = [...prev];
+            n[activeProgramIdx] = {
+              output: result.output,
+              status: result.status,
+            };
+            return n;
+          });
+        } catch (err) {
+          setCompilationResults((prev) => {
+            const n = [...prev];
+            n[activeProgramIdx] = {
+              output: `EXECUTION ERROR: ${err.message}`,
+              status: "error",
+            };
+            return n;
+          });
+        }
+      } else {
+        alert("Local Execution requires the Secure Launcher App.");
+      }
     }
   };
 
@@ -642,6 +691,162 @@ export default function CIESession() {
     }
   };
 
+  const registerCIntellisense = (monaco, lang) => {
+    const keywords = lang === 'java' 
+      ? ["public", "class", "static", "void", "main", "String", "System.out.println", "Scanner", "if", "else", "for", "while", "return"]
+      : ["int", "float", "char", "double", "printf", "scanf", "if", "else", "for", "while", "return", "include", "main", "iostream", "using", "namespace", "std", "cout", "cin", "endl"];
+
+    monaco.languages.registerCompletionItemProvider(lang, {
+      provideCompletionItems: (model, position) => {
+        const word = model.getWordUntilPosition(position);
+        const range = {
+          startLineNumber: position.lineNumber,
+          endLineNumber: position.lineNumber,
+          startColumn: word.startColumn,
+          endColumn: word.endColumn,
+        };
+        const suggestions = keywords.map(k => ({
+          label: k,
+          kind: monaco.languages.CompletionItemKind.Keyword,
+          insertText: k,
+          range: range,
+        }));
+        return { suggestions };
+      },
+    });
+  };
+
+  const renderTerminal = () => (
+    <div
+      style={{
+        flex: 1,
+        background: "#010409",
+        borderRadius: "20px",
+        border: "1px solid #1e293b",
+        overflow: "hidden",
+        display: "flex",
+        flexDirection: "column",
+        minHeight: language === "flutter" ? "0" : "300px",
+      }}
+    >
+      <div
+        style={{
+          height: "35px",
+          background: "#020617",
+          borderBottom: "1px solid #1e293b",
+          display: "flex",
+          alignItems: "center",
+          padding: "0 15px",
+          gap: "10px",
+        }}
+      >
+        <Terminal size={14} color="#64748b" />
+        <span style={{ fontSize: "9px", fontWeight: "900", color: "#64748b" }}>
+          DEBUG CONSOLE
+        </span>
+        <div style={{ flex: 1 }}></div>
+        <button
+          onClick={() => handleRunCode()}
+          style={{
+            background: "#10b981",
+            color: "#000",
+            border: "none",
+            borderRadius: "6px",
+            padding: "4px 10px",
+            fontSize: "10px",
+            fontWeight: "900",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: "5px",
+          }}
+        >
+          <Play size={10} fill="currentColor" /> RUN BUILD
+        </button>
+      </div>
+      <div
+        style={{
+          flex: 1,
+          padding: "15px",
+          overflowY: "auto",
+          background: "#010409",
+        }}
+      >
+        <pre
+          style={{
+            margin: 0,
+            fontSize: "11px",
+            lineHeight: "1.6",
+            fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+            color: compilationResults[activeProgramIdx]?.isWarning
+              ? "#f59e0b"
+              : compilationResults[activeProgramIdx]?.status === "error"
+                ? "#f87171"
+                : "#34d399",
+            whiteSpace: "pre-wrap",
+            letterSpacing: "0.2px",
+          }}
+        >
+          {compilationResults[activeProgramIdx]?.output ||
+            "> [READY] Waiting for build sequence..."}
+        </pre>
+      </div>
+      
+      {/* 🚨 INPUT TERMINAL (Only for C/C++/Java) */}
+      {language !== "flutter" && (
+        <div
+          style={{
+            height: "150px",
+            background: "#020617",
+            borderTop: "1px solid #1e293b",
+            display: "flex",
+            flexDirection: "column",
+            boxShadow: "0 -10px 20px rgba(0,0,0,0.2)"
+          }}
+        >
+          <div style={{
+            padding: "8px 15px",
+            fontSize: "10px",
+            fontWeight: "900",
+            color: "#64748b",
+            background: "rgba(16, 185, 129, 0.05)",
+            display: "flex",
+            justifyContent: "space-between",
+            borderBottom: "1px solid rgba(30, 41, 59, 0.5)"
+          }}>
+            <span style={{ display: "flex", alignItems: "center", gap: "5px" }}>
+               <Activity size={12} /> PROGRAM INPUT (STDIN)
+            </span>
+            <span style={{ opacity: 0.6 }}>ENTER VALUES SEPARATED BY SPACE/NEWLINE</span>
+          </div>
+          <textarea
+            value={programInputs[activeProgramIdx] || ""}
+            onChange={(e) => {
+              const n = [...programInputs];
+              n[activeProgramIdx] = e.target.value;
+              setProgramInputs(n);
+            }}
+            placeholder="Type your inputs here (e.g. 10 20)..."
+            spellCheck="false"
+            style={{
+              flex: 1,
+              background: "transparent",
+              border: "none",
+              color: "#34d399",
+              padding: "15px",
+              fontSize: "13px",
+              fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+              outline: "none",
+              resize: "none",
+              lineHeight: "1.5",
+              letterSpacing: "0.5px"
+            }}
+          />
+        </div>
+      )}
+    </div>
+  );
+
   if (!mounted || loading)
     return (
       <div
@@ -671,6 +876,90 @@ export default function CIESession() {
         overflow: "hidden",
       }}
     >
+
+      {showInputWarning && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 11000,
+            background: "rgba(0,0,0,0.85)",
+            backdropFilter: "blur(10px)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <div
+            style={{
+              background: "#0f172a",
+              padding: "40px",
+              borderRadius: "24px",
+              textAlign: "center",
+              border: "1px solid #1e293b",
+              maxWidth: "450px",
+              boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.5)",
+            }}
+          >
+            <div style={{
+              width: "80px",
+              height: "80px",
+              background: "rgba(245, 158, 11, 0.1)",
+              borderRadius: "50%",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              margin: "0 auto 25px",
+            }}>
+              <AlertCircle size={40} color="#f59e0b" />
+            </div>
+            <h2 style={{ color: "#fff", margin: "0 0 10px", fontSize: "22px" }}>Input Warning</h2>
+            <p style={{ color: "#94a3b8", fontSize: "14px", lineHeight: "1.6", margin: "0 0 30px" }}>
+              Your code seems to require input (<b>scanf / cin / Scanner</b>), but the <b>PROGRAM INPUT (STDIN)</b> box is empty.
+              <br/><br/>
+              The program might freeze if you continue without providing input.
+            </p>
+            <div style={{ display: "flex", gap: "15px" }}>
+              <button
+                onClick={() => setShowInputWarning(false)}
+                style={{
+                  flex: 1,
+                  padding: "12px",
+                  borderRadius: "12px",
+                  background: "#1e293b",
+                  color: "#fff",
+                  border: "1px solid #334155",
+                  fontWeight: "600",
+                  cursor: "pointer",
+                  transition: "all 0.2s",
+                }}
+              >
+                Go Back
+              </button>
+              <button
+                onClick={() => {
+                  setShowInputWarning(false);
+                  // Manually trigger the execution logic by passing a special flag or bypassing the check
+                  handleRunCode(editorRef.current?.getValue() || codes[activeProgramIdx]);
+                }}
+                style={{
+                  flex: 1,
+                  padding: "12px",
+                  borderRadius: "12px",
+                  background: "#f59e0b",
+                  color: "#000",
+                  border: "none",
+                  fontWeight: "700",
+                  cursor: "pointer",
+                  transition: "all 0.2s",
+                }}
+              >
+                Continue Anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {isViolationOverlay && (
         <div
@@ -947,7 +1236,7 @@ export default function CIESession() {
           <div style={{ flex: 1 }}>
             <MonacoEditor
               height="100%"
-              language="dart"
+              language={language === "flutter" ? "dart" : language}
               theme="vs-dark"
               value={codes[activeProgramIdx]}
               options={{
@@ -964,7 +1253,11 @@ export default function CIESession() {
                 monacoRef.current = monaco;
 
                 // Register professional IntelliSense
-                registerDartIntellisense(monaco);
+                if (language === "flutter") {
+                  registerDartIntellisense(monaco);
+                } else {
+                  registerCIntellisense(monaco, language);
+                }
 
                 // Block copy/paste/cut/save commands in Monaco editor (Ctrl/Cmd and Win/Meta)
                 [
@@ -993,210 +1286,110 @@ export default function CIESession() {
           </div>
         </section>
 
-        <aside
-          style={{
-            width: "420px",
-            display: "flex",
-            flexDirection: "column",
-            gap: "10px",
-          }}
-          data-preview-container
-        >
-          <div
+        {language === "flutter" && (
+          <aside
             style={{
-              height: "580px",
-              width: "280px",
-              background: "#020617",
-              borderRadius: "40px",
-              border: "12px solid #1e293b",
-              overflow: "hidden",
-              position: "relative",
-              boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.5)",
-              margin: "0 auto",
+              width: "420px",
+              display: "flex",
+              flexDirection: "column",
+              gap: "10px",
             }}
-            data-preview-container
           >
-            {/* Phone Notch/Speaker */}
             <div
               style={{
-                position: "absolute",
-                top: 0,
-                left: "50%",
-                transform: "translateX(-50%)",
-                width: "120px",
-                height: "25px",
-                background: "#1e293b",
-                borderBottomLeftRadius: "15px",
-                borderBottomRightRadius: "15px",
-                zIndex: 20,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: "8px",
+                height: "580px",
+                width: "280px",
+                background: "#020617",
+                borderRadius: "40px",
+                border: "12px solid #1e293b",
+                overflow: "hidden",
+                position: "relative",
+                boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.5)",
+                margin: "0 auto",
               }}
             >
-              <div
-                style={{
-                  width: "40px",
-                  height: "4px",
-                  background: "#0f172a",
-                  borderRadius: "2px",
-                }}
-              ></div>
-              <div
-                style={{
-                  width: "6px",
-                  height: "6px",
-                  background: "#0f172a",
-                  borderRadius: "50%",
-                }}
-              ></div>
-            </div>
-
-            <div style={{ position: "relative", height: "100%" }}>
-              <iframe
-                ref={iframeRef}
-                key={iframeKey}
-                src={`https://dartpad.dev/embed-flutter.html?theme=light&run=true&split=1&code=${encodeURIComponent(
-                  previewCode,
-                )}&t=${iframeKey}`}
-                style={{
-                  width: "100%",
-                  height: "100%",
-                  border: "none",
-                }}
-                sandbox="allow-scripts allow-same-origin"
-                onLoad={() => {
-                  // HARD RESET: Immediately push the initial code to overwrite any cached DartPad session
-                  if (iframeRef.current?.contentWindow) {
-                    const win = iframeRef.current.contentWindow;
-                    // Send multiple times to ensure it's caught as the compiler starts
-                    [500, 1000, 2000].forEach((delay) => {
-                      setTimeout(() => {
-                        win.postMessage(
-                          { type: "sourceCode", sourceCode: previewCode },
-                          "*",
-                        );
-                        win.postMessage({ type: "run" }, "*");
-                      }, delay);
-                    });
-                  }
-
-                  // Attempt to hide code panel via CSS injection (fallback for older embeds)
-                  try {
-                    const iframeDoc = iframeRef.current?.contentDocument;
-                    if (iframeDoc) {
-                      const style = iframeDoc.createElement("style");
-                      style.textContent = `
-                        .code-panel, .editor, [data-code], .dart-code, .header {
-                          display: none !important;
-                        }
-                        .output-panel, .preview, .console {
-                          width: 100% !important;
-                        }
-                      `;
-                      iframeDoc.head.appendChild(style);
-                    }
-                  } catch (e) {
-                    // Cross-origin - CSS injection may not work, split=1 is the primary fix
-                  }
-                }}
-              />
-              {/* Partial Security Overlay: Blocks the top toolbar and internal DartPad tabs (Code/Output) */}
+              {/* Phone Notch/Speaker */}
               <div
                 style={{
                   position: "absolute",
                   top: 0,
-                  left: 0,
-                  right: 0,
-                  height: "80px", // Increased to cover internal tabs
-                  zIndex: 10,
-                  background: "transparent",
-                  cursor: "not-allowed",
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  width: "120px",
+                  height: "25px",
+                  background: "#1e293b",
+                  borderBottomLeftRadius: "15px",
+                  borderBottomRightRadius: "15px",
+                  zIndex: 20,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: "8px",
                 }}
-                title="Direct interaction with virtual device controls is disabled."
-              />
+              >
+                <div
+                  style={{
+                    width: "40px",
+                    height: "4px",
+                    background: "#0f172a",
+                    borderRadius: "2px",
+                  }}
+                ></div>
+                <div
+                  style={{
+                    width: "6px",
+                    height: "6px",
+                    background: "#0f172a",
+                    borderRadius: "50%",
+                  }}
+                ></div>
+              </div>
+
+              <div style={{ position: "relative", height: "100%" }}>
+                <iframe
+                  ref={iframeRef}
+                  key={iframeKey}
+                  src={`https://dartpad.dev/embed-flutter.html?theme=light&run=true&split=1&code=${encodeURIComponent(
+                    previewCode,
+                  )}&t=${iframeKey}`}
+                  style={{
+                    width: "100%",
+                    height: "100%",
+                    border: "none",
+                  }}
+                  sandbox="allow-scripts allow-same-origin"
+                  onLoad={() => {
+                    if (iframeRef.current?.contentWindow) {
+                      const win = iframeRef.current.contentWindow;
+                      [500, 1000, 2000].forEach((delay) => {
+                        setTimeout(() => {
+                          win.postMessage(
+                            { type: "sourceCode", sourceCode: previewCode },
+                            "*",
+                          );
+                          win.postMessage({ type: "run" }, "*");
+                        }, delay);
+                      });
+                    }
+                  }}
+                />
+              </div>
             </div>
-          </div>
-          <div
+            {renderTerminal()}
+          </aside>
+        )}
+
+        {language !== "flutter" && (
+          <aside
             style={{
-              flex: 1,
-              background: "#010409",
-              borderRadius: "20px",
-              border: "1px solid #1e293b",
-              overflow: "hidden",
+              width: "500px",
               display: "flex",
               flexDirection: "column",
             }}
           >
-            <div
-              style={{
-                height: "35px",
-                background: "#020617",
-                borderBottom: "1px solid #1e293b",
-                display: "flex",
-                alignItems: "center",
-                padding: "0 15px",
-                gap: "10px",
-              }}
-            >
-              <Terminal size={14} color="#64748b" />
-              <span
-                style={{ fontSize: "9px", fontWeight: "900", color: "#64748b" }}
-              >
-                DEBUG CONSOLE
-              </span>
-              <button
-                onClick={() => handleRunCode()}
-                style={{
-                  background: "#10b981",
-                  color: "#000",
-                  padding: "6px 25px",
-                  borderRadius: "8px",
-                  fontSize: "11px",
-                  fontWeight: "900",
-                  border: "none",
-                  cursor: "pointer",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  boxShadow: "0 4px 12px rgba(16, 185, 129, 0.2)",
-                }}
-              >
-                <Play size={14} fill="black" /> RUN BUILD
-              </button>
-              <div style={{ width: "15px" }}></div>
-              <Terminal size={14} color="#64748b" />
-              <span
-                style={{ fontSize: "9px", fontWeight: "900", color: "#64748b" }}
-              >
-                DEBUG CONSOLE
-              </span>
-              <div style={{ flex: 1 }}></div>
-            </div>
-            <div style={{ flex: 1, padding: "15px", overflowY: "auto", background: "#010409" }}>
-              <pre
-                style={{
-                  margin: 0,
-                  fontSize: "11px",
-                  lineHeight: "1.6",
-                  fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-                  color:
-                    compilationResults[activeProgramIdx]?.isWarning
-                      ? "#f59e0b" // Orange for issues but synced
-                      : compilationResults[activeProgramIdx]?.status === "error"
-                      ? "#f87171" // Red for hard failure
-                      : "#34d399", // Green for success
-                  whiteSpace: "pre-wrap",
-                  letterSpacing: "0.2px",
-                }}
-              >
-                {compilationResults[activeProgramIdx]?.output ||
-                  "> [READY] Waiting for build sequence..."}
-              </pre>
-            </div>
-          </div>
-        </aside>
+            {renderTerminal()}
+          </aside>
+        )}
       </main>
 
       {showSubmitConfirm && (

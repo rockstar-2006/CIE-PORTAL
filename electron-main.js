@@ -8,11 +8,13 @@ const {
   screen,
 } = require("electron");
 const path = require("path");
+const fs = require("fs");
+const os = require("os");
 const isDev = !app.isPackaged;
 
 let mainWindow;
 let focusRecoveryInterval = null;
-const { exec } = require("child_process");
+const { exec, spawn } = require("child_process");
 
 // ═══════════════════════════════════════════════════════════════
 //  WINDOWS TASKBAR SUPPRESSION (NUCLEAR OPTION)
@@ -459,4 +461,119 @@ app.on("activate", () => {
 app.on("will-quit", () => {
   globalShortcut.unregisterAll();
   clearInterval(focusRecoveryInterval);
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  LOCAL COMPILATION HANDLER (C, C++, JAVA)
+// ═══════════════════════════════════════════════════════════════
+ipcMain.handle("compile:local", async (event, { language, code, input }) => {
+  const tempDir = path.join(os.tmpdir(), "cie-portal-compile");
+  if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+
+  let filename = "main";
+  let compileCmd = "";
+  let runArgs = [];
+  let executableName = "";
+
+  switch (language) {
+    case "c":
+      filename = "solution.c";
+      executableName = "solution.exe";
+      compileCmd = `gcc "${path.join(tempDir, filename)}" -o "${path.join(tempDir, executableName)}"`;
+      runArgs = [path.join(tempDir, executableName)];
+      break;
+    case "cpp":
+      filename = "solution.cpp";
+      executableName = "solution.exe";
+      compileCmd = `g++ "${path.join(tempDir, filename)}" -o "${path.join(tempDir, executableName)}"`;
+      runArgs = [path.join(tempDir, executableName)];
+      break;
+    case "java":
+      // More robust class name detection (handles public class, class, etc.)
+      const classMatch = code.match(/(?:public\s+)?class\s+(\w+)/);
+      const className = classMatch ? classMatch[1] : "Main";
+      filename = `${className}.java`;
+      compileCmd = `javac "${path.join(tempDir, filename)}"`;
+      runArgs = ["java", "-cp", tempDir, className];
+      break;
+    default:
+      return { status: "error", output: "Unsupported language" };
+  }
+
+  const filePath = path.join(tempDir, filename);
+  fs.writeFileSync(filePath, code);
+
+  return new Promise((resolve) => {
+    // 1. Compile
+    exec(compileCmd, (err, stdout, stderr) => {
+      if (err || stderr) {
+        return resolve({ 
+          status: "error", 
+          output: `BUILD ERROR:\n${stderr || err.message}` 
+        });
+      }
+
+      // 2. Run with spawn to support stdin
+      let output = "";
+      let errorOutput = "";
+      
+      const child = (language === "java") 
+        ? spawn(runArgs[0], runArgs.slice(1))
+        : spawn(runArgs[0]);
+
+      if (input) {
+        console.log(`>>> [LOCAL EXEC] Sending Input: ${input}`);
+        child.stdin.write(input + "\n");
+        child.stdin.end();
+      }
+
+      const timeout = setTimeout(() => {
+        child.kill();
+        resolve({ status: "error", output: `EXECUTION TIMEOUT (15s).\n\nPossible Reasons:\n1. Your code has an infinite loop.\n2. Your code is waiting for input (scanf/cin) but the STDIN box was empty or incorrect.\n3. The program crashed.` });
+      }, 15000);
+
+      child.stdout.on("data", (data) => {
+        output += data.toString();
+      });
+
+      child.stderr.on("data", (data) => {
+        errorOutput += data.toString();
+      });
+
+      child.on("close", (code) => {
+        clearTimeout(timeout);
+        resolve({
+          status: "success",
+          output: output + (errorOutput ? `\nERRORS:\n${errorOutput}` : "")
+        });
+
+        // Cleanup
+        try {
+          if (language === "java") {
+            // Cleanup .class files
+            const files = fs.readdirSync(tempDir);
+            files.forEach(file => {
+              if (file.endsWith(".class") || file === filename) {
+                fs.unlinkSync(path.join(tempDir, file));
+              }
+            });
+          } else {
+            if (fs.existsSync(path.join(tempDir, executableName))) {
+              fs.unlinkSync(path.join(tempDir, executableName));
+            }
+            if (fs.existsSync(filePath)) {
+              fs.unlinkSync(filePath);
+            }
+          }
+        } catch (e) {
+          console.error("Cleanup error:", e);
+        }
+      });
+
+      child.on("error", (err) => {
+        clearTimeout(timeout);
+        resolve({ status: "error", output: `RUNTIME ERROR: ${err.message}` });
+      });
+    });
+  });
 });

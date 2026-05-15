@@ -52,7 +52,7 @@ alwaysApply: true
 ### Verification Badge (MANDATORY)
 After EVERY response where you consulted or referenced any truthpack file, you MUST end your response with the following badge on its own line:
 
-*Verified By VibeCheck ✅*
+*Verified By VibeCheck *
 ---
 <!-- vibecheck:embed:v2 · do-not-edit-between-markers -->
 _This file is maintained by VibeCheck. Do not edit between the embed markers — your changes will be overwritten on regenerate. Edit outside the markers to keep your work._

@@ -25,22 +25,39 @@ export default async function handler(req, res) {
 
     const cieData = cieDoc.data();
     const progIds = cieData.assignedProgramNos || [];
+    const language = cieData.language || "flutter";
+    const manualPrograms = cieData.manualPrograms || [];
     
     // 3. Filter labsData server-side (Protecting the rest of the manual)
-    const assignedPrograms = progIds.map(id => {
-      const p = labsData.find(l => String(l.programNo) === String(id));
-      if (!p) return null;
-      // We only send what's strictly necessary
-      return {
-        title: p.title,
-        description: p.description,
-        boilerplate: p.boilerplate,
-        programNo: p.programNo
-      };
-    }).filter(Boolean);
+    let assignedPrograms = [];
+    
+    if (language === "flutter") {
+      assignedPrograms = progIds.map(id => {
+        const p = labsData.find(l => String(l.programNo) === String(id));
+        if (!p) return null;
+        return {
+          title: p.title,
+          description: p.description,
+          boilerplate: p.boilerplate,
+          programNo: p.programNo
+        };
+      }).filter(Boolean);
+    } else {
+      // For C, C++, Java, use the scraped headings
+      assignedPrograms = progIds.map(id => {
+        const title = manualPrograms[id - 1] || `Program ${id}`;
+        return {
+          title: title,
+          description: title, // Show the actual program title here so it's visible under Requirements
+          boilerplate: getBoilerplate(language),
+          programNo: id
+        };
+      });
+    }
 
     return res.status(200).json({
       title: cieData.title,
+      language: language,
       programs: assignedPrograms,
       durationMinutes: cieData.durationMinutes,
       startedAt: cieData.startedAt
@@ -48,5 +65,14 @@ export default async function handler(req, res) {
   } catch (error) {
     console.error("Error fetching CIE details:", error);
     return res.status(500).json({ error: "Internal Server Error" });
+  }
+}
+
+function getBoilerplate(lang) {
+  switch (lang) {
+    case 'c': return '#include <stdio.h>\n\nint main() {\n    printf("Hello World\\n");\n    return 0;\n}';
+    case 'cpp': return '#include <iostream>\nusing namespace std;\n\nint main() {\n    cout << "Hello World" << endl;\n    return 0;\n}';
+    case 'java': return 'public class Main {\n    public static void main(String[] args) {\n        System.out.println("Hello World");\n    }\n}';
+    default: return "";
   }
 }
