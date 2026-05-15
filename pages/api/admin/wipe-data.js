@@ -3,6 +3,10 @@ import { adminDb, adminAuth } from "@/lib/firebase-admin";
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ message: 'Method not allowed' });
 
+  if (!adminDb || !adminAuth) {
+    return res.status(500).json({ error: "Firebase Admin SDK not initialized. Check your environment variables." });
+  }
+
   try {
     const results = { usersDeleted: 0, ciesDeleted: 0, subsDeleted: 0, logsDeleted: 0 };
 

@@ -1,7 +1,7 @@
 import formidable from 'formidable';
 import fs from 'fs';
 import path from 'path';
-import { PDFParse } from 'pdf-parse';
+import pdf from 'pdf-parse';
 import Groq from "groq-sdk";
 
 export const config = {
@@ -49,9 +49,7 @@ export default async function handler(req, res) {
     let text = "";
     try {
       const dataBuffer = fs.readFileSync(file.filepath);
-      const uint8Array = new Uint8Array(dataBuffer);
-      const parser = new PDFParse(uint8Array);
-      const pdfData = await parser.getText();
+      const pdfData = await pdf(dataBuffer);
       text = pdfData.text;
       console.log(`>>> [DEBUG] PDF Text extracted. Length: ${text.length}`);
     } catch (pdfErr) {
